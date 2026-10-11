@@ -37,8 +37,17 @@ REAPER's own MIDI export is exact: steps of 1/32 note, each at the average tempo
 - CI (`.github/workflows/build.yml`): tests on Linux, Mac and Windows with Python 3.9 and 3.13, then builds both apps. Pushing a `v*` tag attaches the zips to a GitHub release. Watch the run to green after every push.
 - The Mac build is ad-hoc signed only, for Apple silicon. The README gives the Gatekeeper and SmartScreen steps. Proper signing and notarization would need an Apple Developer ID certificate in CI secrets.
 
+## Screen reader behaviour, and why the code looks the way it does
+
+Tested with VoiceOver on macOS 26 on 2026-10-11, driving the real app with keystrokes and reading `content of last phrase` from VoiceOver:
+
+- **The report needs an explicit label on macOS.** wx has no API for it, so VoiceOver said only "text". `mac_accessibility_label()` sets `accessibilityLabel` on the scroll view and its text view through the Objective-C runtime (ctypes, no extra dependency). It now says "Report, text". Windows readers take the name from the static label created just before the field, so keep that label directly before the report in creation order.
+- **A field that already has focus is not re-read when its text changes.** After Fix, VoiceOver kept reading the old report. `show()` steps focus to the Choose button and back after 150 ms when the report is already focused; VoiceOver then reads the new result in full.
+- **Tab order is creation order.** Buttons are created in on-screen order: Fix, Show cleaned files, Compare.
+- The saved line is short ("Saved next to the original as ...") because a full path is noise spoken aloud and clutter on screen. The command line keeps the full path for scripts.
+
 ## Not verified yet
 
-- The app has only been exercised headlessly here (handlers called with the window unshown). How VoiceOver and NVDA read it in real use still needs a person. In particular: whether VoiceOver announces the report's "Report" label on the text field.
+- NVDA, JAWS and Narrator on a real Windows machine. CI builds and self-tests the Windows app, but no person has used it there.
 - The Windows build has not run on a real Windows machine; CI builds and self-tests it.
 - Pro Tools has not been tested with a cleaned file.

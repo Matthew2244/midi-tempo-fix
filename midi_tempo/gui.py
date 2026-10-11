@@ -10,6 +10,7 @@ goes to the report so a screen reader reads the result straight away.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 
 import wx
@@ -24,6 +25,56 @@ INTRO = (
     "Choose files to check. Nothing changes until you press Fix, "
     "and your original files are never changed."
 )
+
+
+def mac_accessibility_label(ctrl: wx.Window, label: str) -> None:
+    """Give a control a spoken name on macOS, where wx has no API for it.
+
+    Without this VoiceOver announces the report as just "text". Windows screen
+    readers already take the name from the static label placed before it.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def send(obj, sel, *args, restype=ctypes.c_void_p, argtypes=()):
+            f = objc.objc_msgSend
+            f.restype = restype
+            f.argtypes = [ctypes.c_void_p, ctypes.c_void_p, *argtypes]
+            return f(obj, objc.sel_registerName(sel.encode()), *args)
+
+        text = send(objc.objc_getClass(b"NSString"), "stringWithUTF8String:",
+                    label.encode(), argtypes=(ctypes.c_char_p,))
+        view = ctrl.GetHandle()
+        targets = [view]
+        if send(view, "respondsToSelector:", objc.sel_registerName(b"documentView"),
+                restype=ctypes.c_bool, argtypes=(ctypes.c_void_p,)):
+            doc = send(view, "documentView")
+            if doc:
+                targets.append(doc)
+        for t in targets:
+            send(t, "setAccessibilityLabel:", text, restype=None, argtypes=(ctypes.c_void_p,))
+    except Exception:
+        pass  # a missing label must never stop the app
+
+
+def reveal(paths: list[str]) -> None:
+    """Show files in Finder or File Explorer, selected."""
+    if not paths:
+        return
+    if sys.platform == "darwin":
+        subprocess.run(["open", "-R", *paths])
+    elif sys.platform == "win32":
+        subprocess.run(["explorer", "/select,", os.path.normpath(paths[0])])
+    else:
+        subprocess.run(["xdg-open", os.path.dirname(paths[0])])
 
 
 class FileDrop(wx.FileDropTarget):
@@ -41,6 +92,7 @@ class MainFrame(wx.Frame):
         super().__init__(None, title=APP_NAME, size=(760, 560))
         self.files: list[str] = []
         self.fixable: list[str] = []
+        self.saved: list[str] = []
 
         panel = wx.Panel(self)
         intro = wx.StaticText(panel, label=INTRO)
@@ -54,16 +106,21 @@ class MainFrame(wx.Frame):
             panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2, name="Report"
         )
         self.report.SetValue("No files checked yet.")
+        mac_accessibility_label(self.report, "Report")
 
         self.fix = wx.Button(panel, label="&Fix and save cleaned copies")
         self.fix.SetToolTip("Saves a copy of each file that needs it, next to the original, named '(tempo fixed)'.")
+        self.show_saved = wx.Button(panel, label="S&how cleaned files")
+        self.show_saved.SetToolTip("Opens the folder with the cleaned copies selected.")
         self.compare = wx.Button(panel, label="Compare with a REAPER &project...")
         self.compare.SetToolTip("Checks the chosen files' tempo against a REAPER project's tempo map.")
         self.fix.Disable()
         self.compare.Disable()
+        self.show_saved.Disable()
 
         buttons = wx.BoxSizer(wx.HORIZONTAL)
         buttons.Add(self.fix, 0, wx.RIGHT, 8)
+        buttons.Add(self.show_saved, 0, wx.RIGHT, 8)
         buttons.Add(self.compare, 0)
 
         s = wx.BoxSizer(wx.VERTICAL)
@@ -78,6 +135,7 @@ class MainFrame(wx.Frame):
         self.choose.Bind(wx.EVT_BUTTON, self.on_choose)
         self.fix.Bind(wx.EVT_BUTTON, self.on_fix)
         self.compare.Bind(wx.EVT_BUTTON, self.on_compare)
+        self.show_saved.Bind(wx.EVT_BUTTON, lambda e: reveal(self.saved))
         self.SetDropTarget(FileDrop(self))
         self.report.SetDropTarget(FileDrop(self))
         self.choose.SetFocus()
@@ -87,6 +145,7 @@ class MainFrame(wx.Frame):
         f = wx.Menu()
         m_open = f.Append(wx.ID_OPEN, "&Choose MIDI files...\tCtrl+O")
         m_fix = f.Append(wx.ID_SAVE, "&Fix and save cleaned copies\tCtrl+S")
+        m_show = f.Append(wx.ID_ANY, "S&how cleaned files\tCtrl+Shift+S")
         m_cmp = f.Append(wx.ID_ANY, "Compare with a REAPER &project...\tCtrl+R")
         f.AppendSeparator()
         m_quit = f.Append(wx.ID_EXIT, "&Quit\tCtrl+Q")
@@ -98,15 +157,25 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_choose, m_open)
         self.Bind(wx.EVT_MENU, self.on_fix, m_fix)
         self.Bind(wx.EVT_MENU, self.on_compare, m_cmp)
+        self.Bind(wx.EVT_MENU, lambda e: reveal(self.saved), m_show)
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), m_quit)
         self.Bind(wx.EVT_MENU, self.on_about, m_about)
 
     # -------------------------------------------------------- actions
 
     def show(self, lines: list[str]):
+        """Put the result in the report and move focus there so it is read aloud.
+
+        A screen reader only reads a field when focus arrives, so if the report
+        already has focus, step away for a moment and come back.
+        """
         self.report.SetValue("\n".join(lines).rstrip())
         self.report.SetInsertionPoint(0)
-        self.report.SetFocus()
+        if self.FindFocus() is self.report:
+            self.choose.SetFocus()
+            wx.CallLater(150, self.report.SetFocus)
+        else:
+            self.report.SetFocus()
 
     def check(self, paths: list[str]):
         self.files = [p for p in paths if os.path.isfile(p)]
@@ -132,6 +201,8 @@ class MainFrame(wx.Frame):
         else:
             lines.append("No files to check.")
         self.fix.Enable(bool(self.fixable))
+        self.saved = []
+        self.show_saved.Disable()
         self.compare.Enable(bool(self.files))
         self.show(lines)
 
@@ -148,30 +219,38 @@ class MainFrame(wx.Frame):
             self.show(["Nothing to fix. Choose MIDI files first."])
             return
         lines = []
+        self.saved = []
         for p in self.fixable:
             try:
-                _, said = fix_file(p)
+                out, said = fix_file(p)
             except PermissionError:
-                said = self._fix_elsewhere(p)
+                out, said = self._fix_elsewhere(p)
             except MidiError as e:
-                said = [f"{os.path.basename(p)}: not fixed, {e}."]
+                out, said = None, [f"{os.path.basename(p)}: not fixed, {e}."]
+            if out:
+                self.saved.append(out)
+                where = "next to the original" if os.path.dirname(out) == os.path.dirname(p) else \
+                    f"in {os.path.basename(os.path.dirname(out)) or os.path.dirname(out)}"
+                said = [line for line in said if not line.startswith("Saved: ")]
+                said.append(f"Saved {where} as \"{os.path.basename(out)}\".")
             lines += said + [""]
         self.fixable = []
         self.fix.Disable()
-        lines.append("Done. Your original files are unchanged.")
+        self.show_saved.Enable(bool(self.saved))
+        lines.append("Done. Your original files are unchanged. Show cleaned files opens their folder.")
         self.show(lines)
 
-    def _fix_elsewhere(self, p: str) -> list[str]:
+    def _fix_elsewhere(self, p: str):
         name = os.path.basename(p)
         with wx.DirDialog(self, f"Can't save next to {name}. Choose a folder for the cleaned copy.") as dlg:
             if dlg.ShowModal() != wx.ID_OK:
-                return [f"{name}: not fixed, no folder chosen."]
+                return None, [f"{name}: not fixed, no folder chosen."]
             stem, ext = os.path.splitext(name)
             out = os.path.join(dlg.GetPath(), f"{stem} (tempo fixed){ext or '.mid'}")
         try:
-            return fix_file(p, out)[1]
+            return fix_file(p, out)
         except (MidiError, OSError) as e:
-            return [f"{name}: not fixed, {e}."]
+            return None, [f"{name}: not fixed, {e}."]
 
     def on_compare(self, _):
         if not self.files:

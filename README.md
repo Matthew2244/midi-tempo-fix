@@ -34,7 +34,7 @@ Get the latest version from the [Releases page](../../releases):
 
 1. Press **Choose MIDI files** (Command-O on Mac, Control-O on Windows) and pick one or more files. You can also drop files on the window, or on the app's Dock icon on a Mac.
 2. The report says what's in each file's tempo map and whether anything needs fixing. Focus moves to the report so your screen reader reads it right away.
-3. If something needs fixing, press **Fix and save cleaned copies** (Command-S or Control-S).
+3. If something needs fixing, press **Fix and save cleaned copies** (Command-S or Control-S). The report says where each copy went, and **Show cleaned files** (Command-Shift-S or Control-Shift-S) opens that folder with them selected.
 
 **Compare with a REAPER project** (Command-R or Control-R) checks a MIDI file's tempo against a REAPER project's tempo map, beat by beat. It's useful for confirming an export matches the session it came from.
 
