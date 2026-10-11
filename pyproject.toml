@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "midi-tempo-fix"
+dynamic = ["version"]
+description = "Check and fix MIDI tempo maps so every app plays them the same."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+app = ["wxPython>=4.2"]
+
+[project.scripts]
+midi-tempo = "midi_tempo.cli:main"
+
+[project.gui-scripts]
+midi-tempo-fix = "midi_tempo.gui:main"
+
+[tool.setuptools]
+packages = ["midi_tempo"]
+
+[tool.setuptools.dynamic]
+version = {attr = "midi_tempo.__version__"}
