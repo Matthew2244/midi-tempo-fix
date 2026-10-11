@@ -4,7 +4,7 @@ Read this before changing anything. It's the current state, not a history.
 
 ## What it is
 
-A tool that checks and fixes the tempo map in Standard MIDI Files so every DAW plays them with the same timing. One engine (`midi_tempo/core.py`, standard library only) behind two front ends: the `midi-tempo` command (`cli.py`) and a wxPython app (`gui.py`). Mac and Windows; the command also runs on Linux.
+A tool that checks and fixes Standard MIDI Files so every DAW plays them the same: the tempo map (`core.py`) and the notes (`notes.py`), both standard library only, behind two front ends: the `midi-tempo` command (`cli.py`) and a wxPython app (`gui.py`). `update.py` lets the packaged app find and install new releases. Mac and Windows; the command also runs on Linux.
 
 Matthew's own copy of the command is `~/bin/midi-tempo`, a symlink to `midi-tempo` at the repo root, so the live tool and the repo can't drift. Edit the repo.
 
@@ -14,7 +14,25 @@ All found on 2026-10-11 from real REAPER 7.82 exports, measured rather than assu
 
 1. **Doubled tempo event at a ramp's end.** REAPER wrote `84.7442` then `85.0` on the same tick at the end of a slowdown. The second is correct by the MIDI rules; an app keeping the first drifts (0.9 s by the end of that song). Logic played it wrong; the cleaned copy played right.
 2. **REAPER ramp hints.** REAPER's export writes text meta events (type 1) reading `REAPER gradual tempo change start <bpm>` and `REAPER gradual tempo change interpolation end`. REAPER's import uses them to rebuild a smooth ramp, and when the ramp ends on a time signature change it places the end marker as if the tempo had stayed at the start value (127 to 90 over 6 beats came back as 6 beats of 127: 2.835 s instead of 3.318). Drift reached 543 ms. With the hints stripped, REAPER imported the same file as 166 square tempo markers, within 0.1 ms of the source project. Ramps ending on a plain tempo marker import fine even with hints, but stripping is harmless there too.
-3. **Tempo map events on a later track** of a format 1 file. Moved to track 0. This one is from the MIDI spec and is covered by tests, not by a real-world failure we observed.
+3. **Tempo map events on a later track** of a format 1 file. Tempo changes are always moved to track 0. Time signatures only move when track 0 lacks one at that tick: notation apps copy them to every track and that is harmless. Key signatures are per-track by design and never move. (Version 1.0 counted all three and called 3,000 of 17,000 files broken; the scan below caught it.)
+
+Doubled tempo events only count when the values differ by more than 0.001 BPM. The same tempo written twice can't make apps disagree and is left alone. (1.0 flagged those too; 36 of the first 40 hits in the scan were this harmless kind.)
+
+## Note problems (`notes.py`)
+
+Duplicates, same-key overlaps, stuck notes and stray releases are fixed; zero-length notes are reported only. Rebuilding pairs note-offs first in, first out, merges same-start duplicates (first velocity, longest end), ends an overlapped note at the re-strike, and ends stuck notes at the track's last tick. At one tick it writes note-offs, then other events in their original order, then note-ons; a zero-length note keeps on-then-off. Only tracks with a fixable problem are rebuilt.
+
+Verification for note fixes: every note start (track, moment, channel, key, first velocity) is identical before and after, every non-note event is at the same moment, and the copy has nothing left to fix.
+
+## How it was trained and broken (2026-10-11)
+
+- Scanned every MIDI file on Matthew's Studio: 17,371 paths, 17,074 readable. The other 297 are genuinely not MIDI (129 empty files, 165 plugin presets named .midi, 3 SMPTE-timed files). No parser bugs.
+- Ran `fix` on all of them: 1,566 fixed, 15,508 clean, **0 crashes, 0 failed verifications**.
+- `test_fuzz_random_broken_files`: 300 random files with doubled tempos, hints, sigs, overlaps, stuck and stray notes; also run once at 4,000 with another seed. Each must verify and fixing the fixed copy must find nothing.
+
+## Updates (`update.py`)
+
+The app asks `api.github.com/repos/Matthew2244/midi-tempo-fix/releases/latest` at most once a day (time stored with `wx.Config`) and on Help, Check for Updates. Installing downloads the platform zip, runs the new app's `--self-test`, then starts a detached script (`swap.sh` / `swap.bat`) that waits for this process to exit, swaps the new app in (Mac: rename old aside, move new in, restore on failure; Windows: robocopy /MIR) and relaunches. `certifi` is bundled so HTTPS works on machines without Homebrew's certificates. `MIDI_TEMPO_FIX_PRETEND_VERSION` and the hidden `--update-now --no-relaunch` flags exist to test the whole path against a real release without the window.
 
 REAPER's own MIDI export is exact: steps of 1/32 note, each at the average tempo over its step, ramps linear in time. Checked on three songs to under 0.25 ms, and one against a rendered click stem (791 clicks within 0.22 ms).
 
@@ -44,6 +62,8 @@ Tested with VoiceOver on macOS 26 on 2026-10-11, driving the real app with keyst
 - **The report needs an explicit label on macOS.** wx has no API for it, so VoiceOver said only "text". `mac_accessibility_label()` sets `accessibilityLabel` on the scroll view and its text view through the Objective-C runtime (ctypes, no extra dependency). It now says "Report, text". Windows readers take the name from the static label created just before the field, so keep that label directly before the report in creation order.
 - **A field that already has focus is not re-read when its text changes.** After Fix, VoiceOver kept reading the old report. `show()` steps focus to the Choose button and back after 150 ms when the report is already focused; VoiceOver then reads the new result in full.
 - **Tab order is creation order.** Buttons are created in on-screen order: Fix, Show cleaned files, Compare.
+- **The update dialog's second button must be titled exactly "Cancel".** macOS alerts give Escape only to a button with that title. As "Not now" (and earlier as Yes/No), Escape did nothing and the dialog could only be left by Install or by hunting for the other button. Found in the VoiceOver pass; checked fixed the same way.
+- **A checkbox reads its state** ("checked checkbox" / "unchecked"). Toggling it re-checks the files into the report without moving focus, so the user stays on the checkbox.
 - The saved line is short ("Saved next to the original as ...") because a full path is noise spoken aloud and clutter on screen. The command line keeps the full path for scripts.
 
 ## Not verified yet

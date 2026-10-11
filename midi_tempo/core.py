@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 HINT = b"REAPER gradual tempo change"
 TEMPO, TIME_SIG, KEY_SIG, END_OF_TRACK = 0x51, 0x58, 0x59, 0x2F
 TEMPO_MAP_TYPES = (TEMPO, TIME_SIG, KEY_SIG)
+DOUBLE_TOLERANCE = 0.001  # BPM; the same tempo written twice is harmless and left alone
 
 
 class MidiError(Exception):
@@ -93,12 +94,25 @@ class MidiFile:
     tracks: list[list[Event]]
 
 
+from . import notes as notes_mod  # noqa: E402  (imported here: notes uses Event above)
+
+
 def read_midi(path: str) -> MidiFile:
     try:
         with open(path, "rb") as f:
             b = f.read()
     except OSError as e:
         raise MidiError(f"could not open it ({e.strerror})") from e
+    if not b:
+        raise MidiError("the file is empty")
+    if b[:4] == b"RIFF" and b[8:12] == b"RMID":  # Windows .rmi: a MIDI file in a RIFF wrapper
+        i = 12
+        while i + 8 <= len(b):
+            size = struct.unpack("<I", b[i + 4 : i + 8])[0]
+            if b[i : i + 4] == b"data":
+                b = b[i + 8 : i + 8 + size]
+                break
+            i += 8 + size + (size & 1)
     if b[:4] != b"MThd" or len(b) < 14:
         raise MidiError("it is not a MIDI file")
     hlen = struct.unpack(">I", b[4:8])[0]
@@ -258,10 +272,15 @@ class Report:
     hints: int = 0
     misplaced: int = 0
     sigs: list[tuple[int, int, int]] = field(default_factory=list)
+    notes: "notes_mod.NoteCounts" = None
+
+    @property
+    def tempo_needs_fix(self) -> bool:
+        return bool(self.doubled or self.hints or self.misplaced)
 
     @property
     def needs_fix(self) -> bool:
-        return bool(self.doubled or self.hints or self.misplaced)
+        return self.tempo_needs_fix or bool(self.notes and self.notes.fixable)
 
 
 def analyze(mf: MidiFile, name: str = "") -> Report:
@@ -283,7 +302,7 @@ def analyze(mf: MidiFile, name: str = "") -> Report:
         while j + 1 < len(tempos) and tempos[j + 1][0] == tempos[i][0]:
             j += 1
         first_wins.append(tempos[i])
-        if j > i:
+        if j > i and any(abs(tempos[k][1] - tempos[j][1]) > DOUBLE_TOLERANCE for k in range(i, j)):
             r.doubled.append(Doubled(tempos[i][0], tempos[i][1], tempos[j][1]))
         i = j + 1
     if r.doubled:
@@ -302,9 +321,28 @@ def analyze(mf: MidiFile, name: str = "") -> Report:
         for e in events:
             if e.meta_type in (1, 6) and HINT in e.raw:
                 r.hints += 1
-            if ti > 0 and mf.fmt == 1 and e.meta_type in TEMPO_MAP_TYPES:
-                r.misplaced += 1
+    r.misplaced = len(_misplaced(mf))
+    r.notes = notes_mod.analyze_notes(mf.tracks)
     return r
+
+
+def _misplaced(mf: MidiFile) -> list[tuple[int, int]]:
+    """(track, index) of tempo map events that belong on the first track and are missing there.
+
+    Tempo changes always belong on the first track of a format 1 file. Time
+    signatures on other tracks are common (notation apps copy them to every
+    track) and harmless when the first track has the same change; only ones the
+    first track lacks are counted. Key signatures are per-track by design.
+    """
+    if mf.fmt != 1 or len(mf.tracks) < 2:
+        return []
+    sig_ticks = {e.tick for e in mf.tracks[0] if e.meta_type == TIME_SIG}
+    out = []
+    for ti in range(1, len(mf.tracks)):
+        for ei, e in enumerate(mf.tracks[ti]):
+            if e.meta_type == TEMPO or (e.meta_type == TIME_SIG and e.tick not in sig_ticks):
+                out.append((ti, ei))
+    return out
 
 
 def _beats(ticks: int, division: int) -> str:
@@ -312,16 +350,16 @@ def _beats(ticks: int, division: int) -> str:
     return n(int(b), "beat") if b == int(b) else f"{b:.1f} beats"
 
 
-def describe(r: Report) -> list[str]:
+def describe(r: Report, notes: bool = True) -> list[str]:
     """The report as plain sentences, one per line, for speech and for eyes."""
     lines = []
     if r.first_bpm is None:
-        lines.append(f"{r.name}: no tempo events, so every app plays it at 120 BPM. Nothing to fix.")
-        return lines
-    lines.append(
-        f"{r.name}: {n(r.tempo_count, 'tempo event')}, starts at {r.first_bpm:g} BPM, "
-        f"last note at {r.length_seconds:.1f} seconds."
-    )
+        lines.append(f"{r.name}: no tempo events, so every app plays it at 120 BPM.")
+    else:
+        lines.append(
+            f"{r.name}: {n(r.tempo_count, 'tempo event')}, starts at {r.first_bpm:g} BPM, "
+            f"last note at {r.length_seconds:.1f} seconds."
+        )
     if r.ramps:
         lines.append(f"{n(len(r.ramps), 'tempo ramp')}, written as small steps the way MIDI requires:")
         for rp in r.ramps:
@@ -331,12 +369,14 @@ def describe(r: Report) -> list[str]:
             )
         lines.append("The decimal tempos inside a ramp are expected. They keep the timing exact.")
     if r.doubled:
-        lines.append(f"Problem: {n(len(r.doubled), 'place')} with two tempo events on the same tick.")
-        for d in r.doubled:
+        lines.append(f"Problem: {n(len(r.doubled), 'place')} with two different tempos on the same tick.")
+        for d in r.doubled[:MAX_LISTED]:
             lines.append(
                 f"  {bar_beat(d.tick, r.division, r.sigs)}: {d.lost_bpm:.4f} then {d.winning_bpm:.4f}. "
                 f"The second is right."
             )
+        if len(r.doubled) > MAX_LISTED:
+            lines.append(f"  And {len(r.doubled) - MAX_LISTED} more.")
         if abs(r.doubled_cost_ms) >= 0.5:
             lines.append(
                 f"  An app that keeps the first one, as Logic can, lands the last note "
@@ -349,99 +389,181 @@ def describe(r: Report) -> list[str]:
         )
     if r.misplaced:
         lines.append(
-            f"Problem: {n(r.misplaced, 'tempo or time signature event')} on a later track. The tempo "
-            f"map belongs on the first track, and some apps only look there."
+            f"Problem: {n(r.misplaced, 'tempo or time signature change')} only on a later track. "
+            f"They belong on the first track, and some apps only look there."
         )
-    lines.append("Needs fixing." if r.needs_fix else "Clean. Every app should play this timing the same way.")
+    c = r.notes
+    if notes and c:
+        if c.duplicates:
+            lines.append(
+                f"Problem: {n(c.duplicates, 'duplicate note')}, the same key struck twice at the same moment. "
+                f"Some apps play both, some play one."
+            )
+        if c.overlaps:
+            lines.append(
+                f"Problem: {n(c.overlaps, 'overlapping note')}, a key struck again before it was released. "
+                f"Apps disagree about which release ends which note, so note lengths change between apps."
+            )
+        if c.stuck:
+            lines.append(
+                f"Problem: {n(c.stuck, 'note')} that never end. Some apps cut them at the end, "
+                f"some hold them forever."
+            )
+        if c.stray_offs:
+            lines.append(f"Problem: {n(c.stray_offs, 'note release')} with no note playing.")
+        if c.zero_length:
+            lines.append(
+                f"Left alone: {n(c.zero_length, 'note')} with no length. Some apps skip these and some "
+                f"play a click, and no length is right for every case."
+            )
+    fixable = r.tempo_needs_fix or (notes and c and c.fixable)
+    lines.append("Needs fixing." if fixable else "Clean. Every app should play this the same way.")
     return lines
+
+
+MAX_LISTED = 10
 
 
 # ---------------------------------------------------------------- repair
 
 
-def repair(mf: MidiFile) -> tuple[MidiFile, dict]:
+def repair(mf: MidiFile, notes: bool = True) -> tuple[MidiFile, dict]:
     """Return a cleaned copy and counts of what changed. The input is not modified."""
     tracks = [list(t) for t in mf.tracks]
-    changed = {"doubled": 0, "hints": 0, "moved": 0}
+    changed = {"doubled": 0, "hints": 0, "moved": 0, "duplicates": 0, "overlaps": 0, "stuck": 0, "stray_offs": 0}
 
-    # 1. REAPER ramp notes
+    # 1. tempo map events onto the first track (format 1 only), before anything shifts indexes
+    misplaced = set(_misplaced(mf))
+    if misplaced:
+        moved = []
+        for ti in range(1, len(tracks)):
+            stay = []
+            for ei, e in enumerate(tracks[ti]):
+                (moved if (ti, ei) in misplaced else stay).append(e)
+            tracks[ti] = stay
+        changed["moved"] = len(moved)
+        first = [e for e in tracks[0] if e.meta_type != END_OF_TRACK]
+        eot = [e for e in tracks[0] if e.meta_type == END_OF_TRACK]
+        merged = sorted(first + moved, key=lambda e: e.tick)  # stable: track 0's own events first
+        last = max([e.tick for e in merged] + [e.tick for e in eot] + [0])
+        tracks[0] = merged + [Event(last, b"\xff\x2f\x00")]
+
+    # 2. REAPER ramp notes
     for ti, events in enumerate(tracks):
         keep = [e for e in events if not (e.meta_type in (1, 6) and HINT in e.raw)]
         changed["hints"] += len(events) - len(keep)
         tracks[ti] = keep
 
-    # 2. tempo map events onto the first track (format 1 only)
-    if mf.fmt == 1 and len(tracks) > 1:
-        moved = []
-        for ti in range(1, len(tracks)):
-            stay = []
-            for e in tracks[ti]:
-                (moved if e.meta_type in TEMPO_MAP_TYPES else stay).append(e)
-            tracks[ti] = stay
-        if moved:
-            changed["moved"] = len(moved)
-            first = [e for e in tracks[0] if e.meta_type != END_OF_TRACK]
-            eot = [e for e in tracks[0] if e.meta_type == END_OF_TRACK]
-            merged = sorted(first + moved, key=lambda e: e.tick)  # stable: track 0 first
-            last = max([e.tick for e in merged] + [e.tick for e in eot] + [0])
-            tracks[0] = merged + [Event(last, b"\xff\x2f\x00")]
-
-    # 3. doubled tempo events: keep the last of each same-tick group
+    # 3. different tempos on one tick: keep the last; the same tempo twice is left alone
     for ti, events in enumerate(tracks):
         out: list[Event] = []
         for e in events:
             if e.meta_type == TEMPO:
-                prev = next(
-                    (k for k in range(len(out) - 1, -1, -1) if out[k].tick == e.tick and out[k].meta_type == TEMPO),
-                    None,
-                )
-                if prev is not None:
-                    del out[prev]
-                    changed["doubled"] += 1
+                k = len(out) - 1
+                while k >= 0 and out[k].tick == e.tick:
+                    if out[k].meta_type == TEMPO and abs(out[k].bpm() - e.bpm()) > DOUBLE_TOLERANCE:
+                        del out[k]
+                        changed["doubled"] += 1
+                    k -= 1
             out.append(e)
         tracks[ti] = out
+
+    # 4. note problems
+    if notes:
+        tracks, c = notes_mod.repair_notes(tracks)
+        changed.update(duplicates=c.duplicates, overlaps=c.overlaps, stuck=c.stuck, stray_offs=c.stray_offs)
 
     return MidiFile(mf.header, mf.fmt, mf.division, tracks), changed
 
 
 def fixed_name(path: str) -> str:
     stem, ext = os.path.splitext(path)
-    return f"{stem} (tempo fixed){ext or '.mid'}"
+    if ext.lower() in (".rmi", ""):
+        ext = ".mid"  # a fixed .rmi is saved as a plain MIDI file, which every app opens
+    return f"{stem} (tempo fixed){ext}"
 
 
-def fix_file(path: str, out: str | None = None) -> tuple[str | None, list[str]]:
+def _note_starts(mf: MidiFile) -> list[tuple[int, float, int, int, int]]:
+    """(track, seconds, channel, key, velocity) of every note start, rounded to a microsecond.
+
+    A duplicate (same track, moment, channel and key) counts once, with the
+    velocity of the first, which is the one the fix keeps.
+    """
+    tempos = _tempo_list(mf)
+    out = {}
+    for ti, events in enumerate(mf.tracks):
+        for e in events:
+            if e.raw[0] < 0xF0 and e.is_note_on:
+                k = (ti, round(seconds_at(tempos, mf.division, e.tick), 6), e.raw[0] & 0x0F, e.raw[1])
+                out.setdefault(k, e.raw[2])
+    return sorted(k + (v,) for k, v in out.items())
+
+
+def _other_seconds(mf: MidiFile) -> list[float]:
+    """Times of everything that is not a note or part of the tempo map."""
+    tempos = _tempo_list(mf)
+    out = []
+    for events in mf.tracks:
+        for e in events:
+            if e.raw[0] < 0xF0 and (e.raw[0] & 0xF0) in (0x80, 0x90):
+                continue
+            if e.meta_type in TEMPO_MAP_TYPES or e.meta_type == END_OF_TRACK:
+                continue
+            if e.meta_type in (1, 6) and HINT in e.raw:
+                continue
+            out.append(round(seconds_at(tempos, mf.division, e.tick), 6))
+    return sorted(out)
+
+
+def fix_file(path: str, out: str | None = None, notes: bool = True) -> tuple[str | None, list[str]]:
     """Write a cleaned copy. Returns (saved path or None, sentences)."""
     name = os.path.basename(path)
     mf = read_midi(path)
     before = analyze(mf, name)
-    if not before.needs_fix:
+    if not (before.tempo_needs_fix or (notes and before.notes.fixable)):
         return None, [f"{name}: nothing to fix. No file written."]
-    fixed, changed = repair(mf)
+    fixed, changed = repair(mf, notes)
     out = out or fixed_name(path)
     if os.path.abspath(out) == os.path.abspath(path):
         raise MidiError("refusing to overwrite the original")
     write_midi(out, fixed)
 
-    # verify by reading the saved file back
+    # Verify by reading the saved file back: nothing left to fix, every note still
+    # starts at the same moment with the same key and velocity, everything else
+    # (controllers, names, markers) at the same moment as before.
     back = read_midi(out)
     after = analyze(back, name)
-    t1, t2 = _event_seconds(mf), _event_seconds(back)
-    same_timing = len(t1) == len(t2) and all(abs(a - b) < 1e-6 for a, b in zip(sorted(t1), sorted(t2)))
-    if after.needs_fix or not same_timing:
+    ok = (
+        not after.tempo_needs_fix
+        and not (notes and after.notes.fixable)
+        and _note_starts(back) == _note_starts(mf)
+        and _other_seconds(back) == _other_seconds(mf)
+    )
+    if not ok:
         os.remove(out)
         raise MidiError("the cleaned copy did not verify, so it was deleted. The original is untouched")
 
+    def joined(items):
+        return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+    removed = [n(changed[k], t) for k, t in (
+        ("doubled", "doubled tempo event"), ("hints", "REAPER ramp note"),
+        ("duplicates", "duplicate note"), ("stray_offs", "stray note release"),
+    ) if changed[k]]
+    ended = [t for k, t in (
+        ("overlaps", f"{n(changed['overlaps'], 'overlapping note')} where the key is struck again"),
+        ("stuck", f"{n(changed['stuck'], 'stuck note')} at the end of the track"),
+    ) if changed[k]]
     said = []
-    if changed["doubled"]:
-        said.append(f"removed {n(changed['doubled'], 'doubled tempo event')}")
-    if changed["hints"]:
-        said.append(f"removed {n(changed['hints'], 'REAPER ramp note')}")
+    if removed:
+        said.append("removed " + joined(removed))
     if changed["moved"]:
         said.append(f"moved {n(changed['moved'], 'tempo map event')} to the first track")
-    what = said[0] if len(said) == 1 else ", ".join(said[:-1]) + " and " + said[-1]
-    what = what.replace(" and removed ", " and ")
+    if ended:
+        said.append("ended " + joined(ended))
+    what = said[0] if len(said) == 1 else ", ".join(said[:-1]) + ", and " + said[-1]
     return out, [
-        f"{name}: {what}. Notes and timing unchanged, checked by reading the copy back.",
+        f"{name}: {what}. Every note still starts at the same moment, checked by reading the copy back.",
         f"Saved: {out}",
     ]
 

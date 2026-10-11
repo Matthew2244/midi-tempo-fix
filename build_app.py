@@ -13,7 +13,7 @@ from midi_tempo import __version__
 NAME = "MIDI Tempo Fix"
 args = [
     sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
-    "--name", NAME, "app.py",
+    "--name", NAME, "--collect-data", "certifi", "app.py",
 ]
 if sys.platform == "darwin":
     args += ["--osx-bundle-identifier", "io.github.matthew2244.miditempofix"]

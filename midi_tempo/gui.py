@@ -15,16 +15,20 @@ import sys
 
 import wx
 
-from . import __version__
+import threading
+import time
+
+from . import __version__, update
 from .core import MidiError, analyze, compare_project, describe, fix_file, read_midi
 
 APP_NAME = "MIDI Tempo Fix"
 WILDCARD = "MIDI files (*.mid;*.midi;*.smf)|*.mid;*.midi;*.smf;*.MID;*.MIDI|All files|*.*"
 INTRO = (
-    "Checks the tempo map in MIDI files so every app plays them the same. "
-    "Choose files to check. Nothing changes until you press Fix, "
-    "and your original files are never changed."
+    "Checks MIDI files for the problems that make apps play them differently: "
+    "tempo map mistakes and note mistakes. Choose files to check. Nothing changes "
+    "until you press Fix, and your original files are never changed."
 )
+DAY = 24 * 3600
 
 
 def mac_accessibility_label(ctrl: wx.Window, label: str) -> None:
@@ -100,6 +104,9 @@ class MainFrame(wx.Frame):
 
         self.choose = wx.Button(panel, label="&Choose MIDI files...")
         self.choose.SetToolTip("Pick one or more MIDI files to check. You can also drop files on this window.")
+        self.notes = wx.CheckBox(panel, label="Also check and fix &notes: duplicates, overlaps, stuck notes")
+        self.notes.SetValue(True)
+        self.notes.SetToolTip("When off, only the tempo map is checked and fixed, and notes are left exactly as they are.")
 
         report_label = wx.StaticText(panel, label="&Report")
         self.report = wx.TextCtrl(
@@ -126,6 +133,7 @@ class MainFrame(wx.Frame):
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(intro, 0, wx.ALL, 12)
         s.Add(self.choose, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        s.Add(self.notes, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         s.Add(report_label, 0, wx.LEFT | wx.RIGHT, 12)
         s.Add(self.report, 1, wx.EXPAND | wx.ALL, 12)
         s.Add(buttons, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
@@ -136,6 +144,9 @@ class MainFrame(wx.Frame):
         self.fix.Bind(wx.EVT_BUTTON, self.on_fix)
         self.compare.Bind(wx.EVT_BUTTON, self.on_compare)
         self.show_saved.Bind(wx.EVT_BUTTON, lambda e: reveal(self.saved))
+        self.notes.Bind(wx.EVT_CHECKBOX, lambda e: self.files and self.check(self.files, focus_report=False))
+        self.update_info = None
+        wx.CallLater(1500, self.quiet_update_check)
         self.SetDropTarget(FileDrop(self))
         self.report.SetDropTarget(FileDrop(self))
         self.choose.SetFocus()
@@ -150,7 +161,9 @@ class MainFrame(wx.Frame):
         f.AppendSeparator()
         m_quit = f.Append(wx.ID_EXIT, "&Quit\tCtrl+Q")
         h = wx.Menu()
+        m_upd = h.Append(wx.ID_ANY, "Check for &Updates...")
         m_about = h.Append(wx.ID_ABOUT, f"&About {APP_NAME}")
+        self.Bind(wx.EVT_MENU, self.on_check_updates, m_upd)
         bar.Append(f, "&File")
         bar.Append(h, "&Help")
         self.SetMenuBar(bar)
@@ -177,7 +190,7 @@ class MainFrame(wx.Frame):
         else:
             self.report.SetFocus()
 
-    def check(self, paths: list[str]):
+    def check(self, paths: list[str], focus_report: bool = True):
         self.files = [p for p in paths if os.path.isfile(p)]
         self.fixable = []
         lines = [f"{os.path.basename(p)}: not found." for p in paths if not os.path.isfile(p)]
@@ -185,8 +198,9 @@ class MainFrame(wx.Frame):
             name = os.path.basename(p)
             try:
                 r = analyze(read_midi(p), name)
-                lines += describe(r)
-                if r.needs_fix:
+                with_notes = self.notes.GetValue()
+                lines += describe(r, notes=with_notes)
+                if r.tempo_needs_fix or (with_notes and r.notes.fixable):
                     self.fixable.append(p)
             except MidiError as e:
                 lines.append(f"{name}: could not check it, {e}.")
@@ -194,7 +208,7 @@ class MainFrame(wx.Frame):
         if self.fixable:
             lines.append(
                 f"{len(self.fixable)} of {len(self.files)} file{'s' if len(self.files) != 1 else ''} "
-                f"need fixing. Press Fix and save cleaned copies."
+                f"{'needs' if len(self.fixable) == 1 else 'need'} fixing. Press Fix and save cleaned copies."
             )
         elif self.files:
             lines.append("Nothing needs fixing.")
@@ -204,7 +218,10 @@ class MainFrame(wx.Frame):
         self.saved = []
         self.show_saved.Disable()
         self.compare.Enable(bool(self.files))
-        self.show(lines)
+        if focus_report:
+            self.show(lines)
+        else:
+            self.report.SetValue("\n".join(lines).rstrip())
 
     def on_choose(self, _):
         with wx.FileDialog(
@@ -222,7 +239,7 @@ class MainFrame(wx.Frame):
         self.saved = []
         for p in self.fixable:
             try:
-                out, said = fix_file(p)
+                out, said = fix_file(p, notes=self.notes.GetValue())
             except PermissionError:
                 out, said = self._fix_elsewhere(p)
             except MidiError as e:
@@ -248,7 +265,7 @@ class MainFrame(wx.Frame):
             stem, ext = os.path.splitext(name)
             out = os.path.join(dlg.GetPath(), f"{stem} (tempo fixed){ext or '.mid'}")
         try:
-            return fix_file(p, out)
+            return fix_file(p, out, notes=self.notes.GetValue())
         except (MidiError, OSError) as e:
             return None, [f"{name}: not fixed, {e}."]
 
@@ -273,6 +290,70 @@ class MainFrame(wx.Frame):
                 lines += [f"{name}: could not compare, {e}.", ""]
         self.show(lines)
 
+    # -------------------------------------------------------- updates
+
+    def quiet_update_check(self):
+        """Once a day, ask GitHub if there is a newer version; say so only if there is."""
+        cfg = wx.Config(APP_NAME)
+        if time.time() - cfg.ReadFloat("last_update_check", 0) < DAY:
+            return
+        cfg.WriteFloat("last_update_check", time.time())
+
+        def work():
+            info = update.latest()
+            if update.newer(info):
+                wx.CallAfter(self._announce_update, info)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _announce_update(self, info):
+        self.update_info = info
+        line = f"Version {info['version']} is available. Choose Help, Check for Updates to install it."
+        self.SetTitle(f"{APP_NAME} (update available)")
+        if self.report.GetValue() == "No files checked yet.":
+            self.report.SetValue(f"No files checked yet.\n\n{line}")
+        else:
+            self.report.AppendText(f"\n\n{line}")
+
+    def on_check_updates(self, _):
+        self.show([f"Checking for a newer version. You have {update.current_version()}."])
+        wx.Yield()
+        info = update.latest()
+        if info is None:
+            self.show(["Could not reach GitHub to check for updates. Check the internet connection and try again."])
+            return
+        if not update.newer(info):
+            self.show([f"You have the latest version, {update.current_version()}."])
+            return
+        if not update.installed_app():
+            self.show([f"Version {info['version']} is available. This copy runs from Python, so update it with:",
+                       update.how_to_update_source()])
+            return
+        dlg = wx.MessageDialog(
+            self,
+            f"Version {info['version']} is available. You have {update.current_version()}.\n\n"
+            "Install it now? The app downloads it, checks it, then closes and opens the new version.",
+            "Update available", wx.OK | wx.CANCEL | wx.OK_DEFAULT | wx.ICON_INFORMATION,
+        )
+        # The second button must be titled exactly "Cancel": macOS gives Escape
+        # only to a button with that title, and a dialog you cannot leave from
+        # the keyboard is a trap. ("Not now" looked friendlier and broke Escape.)
+        dlg.SetOKCancelLabels("&Install", "Cancel")
+        go = dlg.ShowModal() == wx.ID_OK
+        dlg.Destroy()
+        if not go:
+            self.show([f"Not installed. Version {info['version']} stays available in Help, Check for Updates."])
+            return
+        self.show([f"Downloading version {info['version']}. This takes a few seconds."])
+        wx.Yield()
+        try:
+            said = update.install(info)
+        except update.UpdateError as e:
+            self.show([f"The update did not install: {e}."])
+            return
+        self.show([said, "Closing now."])
+        wx.CallLater(1500, self.Close)
+
     def on_about(self, _):
         wx.MessageBox(
             f"{APP_NAME} {__version__}\n\nChecks and fixes MIDI tempo maps so every app plays them the same.\n"
@@ -296,6 +377,17 @@ class App(wx.App):
 
 
 def main():
+    if "--update-now" in sys.argv:  # used to test the update path end to end without the window
+        info = update.latest()
+        if not update.newer(info):
+            print("No newer version.")
+            return
+        try:
+            print(update.install(info, relaunch="--no-relaunch" not in sys.argv))
+        except update.UpdateError as e:
+            print(f"Not installed: {e}.")
+            sys.exit(1)
+        return
     if "--self-test" in sys.argv:  # used by the build checks: load everything, show nothing
         app = wx.App(False)
         MainFrame().Destroy()
