@@ -49,14 +49,14 @@ else:
 # Read the self-test through a file, with a time limit: a broken build can leave a helper process
 # holding an output pipe open, and reading a pipe would then wait forever.
 import tempfile
-with tempfile.TemporaryFile("w+") as out:
+with tempfile.TemporaryFile("w+") as log:
     try:
-        subprocess.run([exe, "--self-test"], stdout=out, stderr=subprocess.STDOUT, timeout=120)
+        subprocess.run([exe, "--self-test"], stdout=log, stderr=subprocess.STDOUT, timeout=120)
     except subprocess.TimeoutExpired:
         print("Self-test: TIMED OUT")
         sys.exit(1)
-    out.seek(0)
-    result = out.read().strip().splitlines()[-1:] or ["(no output)"]
+    log.seek(0)
+    result = log.read().strip().splitlines()[-1:] or ["(no output)"]
 print("Self-test:", result[0])
 if "OK" not in result[0]:
     sys.exit("The built app failed its self-test.")
