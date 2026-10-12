@@ -36,11 +36,7 @@ You can also compare against a REAPER project (.rpp), which reads the project's 
 
 Get the latest version from the [Releases page](../../releases):
 
-- **Mac:** MIDI-Tempo-Fix-mac.zip. Unzip it and move MIDI Tempo Fix to Applications. The app isn't signed by Apple yet, so the first time you open it macOS may say it can't check it. Control-click the app, choose Open, then Open again. Or run this once in Terminal:
-
-  ```
-  xattr -dr com.apple.quarantine "/Applications/MIDI Tempo Fix.app"
-  ```
+- **Mac:** MIDI-Tempo-Fix-mac.zip. Unzip it and move MIDI Tempo Fix to Applications. It's signed with a Developer ID and notarized by Apple, so it opens like any other app.
 
   The download is built for Apple silicon Macs. On an Intel Mac, install the command line version below and run `midi-tempo-fix` to open the app.
 
