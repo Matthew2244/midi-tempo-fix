@@ -744,9 +744,10 @@ class MainFrame(wx.Frame):
             text = (f"Listening to {os.path.basename(other)} and lining up "
                     f"{'the MIDI file' if len(files) == 1 else f'{len(files)} MIDI files'}. Escape stops.")
             self.SetStatusText(text)
-            # VoiceOver drops an announcement made while the file dialog is still handing focus back;
-            # 1.2 seconds later it is spoken (the Copyist finding). A check that finished first says nothing.
-            wx.CallLater(1200, lambda: self.busy and announce(text))
+            # Said through the report, not an announcement: when the file dialog closes, VoiceOver lands
+            # on the report and reads it, talking over (or dropping) any announcement. Heard both ways
+            # on 1.7.1 and 1.7.2; the old result was read instead.
+            self.set_report([text])
 
         def work():
             done = []

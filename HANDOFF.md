@@ -54,7 +54,7 @@ Every file's report starts with one line a listener can stop after: "name: clean
 - **Reset the report to plain before bolding.** On macOS, text put into the rich text field inherits the style of what was there, so after one report started bold, the next report came out entirely bold. `set_report()` sets the whole text plain first. Found from the README screenshot, which is why screenshots are part of testing here.
 - **Bold marks only section headings**: the first line of the report and the first line after a blank line (a file's verdict, the summary). Bolding every verdict line in a 300-file batch made everything bold and nothing stand out.
 - **The README screenshot comes from `tools/screenshot.py`**, which has the real window draw itself into a PNG (no screen capture, so no screen-recording prompt). Look at the image after every UI change: it caught the stale "Listening to ..." status line and a jump line disagreeing with the next line by 5 ms.
-- **An announcement right after a file dialog is dropped by VoiceOver** (focus is still being handed back). The audio check's "Listening to ..." goes to the status bar at once and to `announce()` 1.2 s later, only if still busy. Confirmed by ear 2026-10-12.
+- **Right after a file dialog, VoiceOver lands on the report and reads it**, talking over any announcement (an immediate one is dropped, one 1.2 s later is drowned out by the old report). So the audio check puts "Listening to ..." into the report itself before it starts. Heard by ear on the installed app, 2026-10-12.
 - After a batch over 5 seconds: `RequestUserAttention()` (Dock bounce) and a system sound (Glass on Mac, MessageBeep on Windows).
 
 ## Using every core (`batch.py`)
