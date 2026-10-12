@@ -624,14 +624,23 @@ def _other_seconds(mf: MidiFile) -> list[float]:
     return sorted(out)
 
 
-def fix_file(path: str, out: str | None = None, notes: bool = True) -> tuple[str | None, list[str]]:
-    """Write a cleaned copy. Returns (saved path or None, sentences)."""
+def fix_file(path: str, out: str | None = None, notes: bool = True,
+             project: str | None = None) -> tuple[str | None, list[str]]:
+    """Write a cleaned copy. Returns (saved path or None, sentences).
+
+    With a REAPER project, also undoes the export's padded short bars (see
+    project_short_bars) so the copy plays exactly where the project does.
+    """
     name = os.path.basename(path)
     mf = read_midi(path)
     before = analyze(mf, name)
-    if not (before.tempo_needs_fix or (notes and before.notes.fixable)):
+    bars = project_short_bars(project) if project else []
+    padded = export_has_short_bar_fault(mf, bars)
+    if not (before.tempo_needs_fix or (notes and before.notes.fixable) or padded):
         return None, [f"{name}: nothing to fix. No file written."]
     fixed, changed = repair(mf, notes)
+    if padded:
+        return _fix_short_bars(path, mf, fixed, changed, project, out, notes)
     out = out or fixed_name(path)
     if os.path.abspath(out) == os.path.abspath(path):
         raise MidiError("refusing to overwrite the original")
@@ -680,6 +689,83 @@ def fix_file(path: str, out: str | None = None, notes: bool = True) -> tuple[str
     ]
 
 
+def _clock(seconds: float) -> str:
+    m, sec = divmod(int(round(seconds)), 60)
+    return f"{m}:{sec:02d}"
+
+
+def _note_beats(mf: MidiFile) -> list[tuple[int, int, int, int, float]]:
+    """(track, channel, key, velocity, beat) of every note start, in each track's order."""
+    out = []
+    for ti, events in enumerate(mf.tracks):
+        for e in events:
+            if e.raw[0] < 0xF0 and e.is_note_on:
+                out.append((ti, e.raw[0] & 0x0F, e.raw[1], e.raw[2], e.tick / mf.division))
+    return out
+
+
+def short_bar_sentences(mf: MidiFile, rpp: str, bars: list[ShortBar]) -> list[str]:
+    """Plain words for each padded short bar: where, why, and how late the rest came out."""
+    tempos, sigs = _tempo_list(mf), time_signatures(mf)
+    f = rpp_seconds_at_beat(rpp_tempo_points(rpp))
+    out = []
+    for b in bars:
+        tick = int(round((b.beat + b.shift) * mf.division))
+        late = (seconds_at(tempos, mf.division, tick) - f(b.beat)) * 1000
+        out.append(
+            f"  {bar_beat(tick, mf.division, sigs)} ({_clock(b.seconds)}): the project's time signature starts "
+            f"partway through a bar, leaving that bar {b.missing:.2f} of a beat short. REAPER's export made the "
+            f"bar whole, so everything after it plays {late:.0f} ms late."
+        )
+    return out
+
+
+def _fix_short_bars(path, original, cleaned, changed, project, out, notes):
+    name = os.path.basename(path)
+    retimed, bars = match_project_bars(cleaned, project)
+    out = out or fixed_name(path)
+    if os.path.abspath(out) == os.path.abspath(path):
+        raise MidiError("refusing to overwrite the original")
+    write_midi(out, retimed)
+
+    # Verify by reading the copy back: nothing left to fix, the tempo map lands on the
+    # project's beats, and every note kept its key, velocity and order and moved by exactly
+    # the padding before it (no note moves anywhere else).
+    back = read_midi(out)
+    after = analyze(back, name)
+    f = rpp_seconds_at_beat(rpp_tempo_points(project))
+    tempos = _tempo_list(back)
+    end = max((e.tick for t in back.tracks for e in t if e.is_note_on), default=0)
+    worst = max((abs(seconds_at(tempos, back.division, tk) - f(tk / back.division))
+                 for tk in range(0, end + 1, max(1, int(back.division // 4)))), default=0.0)
+    expect = [(ti, ch, key, vel, beat - _shift_at(bars, cleaned.division, beat * cleaned.division))
+              for ti, ch, key, vel, beat in _note_beats(cleaned)]
+    got = _note_beats(back)
+    half_tick = 0.5 / back.division + 1e-9
+    ok = (
+        not after.tempo_needs_fix
+        and not (notes and after.notes.fixable)
+        and worst < 0.001
+        and export_has_short_bar_fault(back, bars) is False
+        and len(expect) == len(got)
+        and all(a[:4] == b[:4] and abs(a[4] - b[4]) <= half_tick for a, b in zip(expect, got))
+    )
+    if not ok:
+        os.remove(out)
+        raise MidiError("the cleaned copy did not verify, so it was deleted. The original is untouched")
+    lines = [f"{name}: moved everything REAPER's export pushed late back to where the project plays it."]
+    lines += short_bar_sentences(original, project, bars)
+    other = [n(changed[k], t) for k, t in (
+        ("doubled", "doubled tempo event"), ("hints", "REAPER ramp note"), ("duplicates", "duplicate note"),
+        ("overlaps", "overlapping note"), ("stuck", "stuck note"), ("stray_offs", "stray note release"),
+    ) if changed[k]]
+    if other:
+        lines.append("Also fixed: " + ", ".join(other) + ".")
+    lines.append(f"It now matches {os.path.basename(project)} beat for beat, checked by reading the copy back.")
+    lines.append(f"Saved: {out}")
+    return out, lines
+
+
 # ---------------------------------------------------------------- REAPER projects
 
 
@@ -705,6 +791,128 @@ def rpp_tempo_points(path: str) -> list[tuple[float, float, int]]:
     if not pts:
         raise MidiError("no tempo found in that REAPER project")
     return pts
+
+
+def rpp_time_signatures(path: str) -> tuple[tuple[int, int], list[tuple[float, int, int]]]:
+    """The project's starting time signature, and (seconds, num, den) of every tempo point that sets one.
+
+    REAPER stores a time signature on a tempo point as one number: numerator in the
+    low 16 bits, denominator above (262147 is 3/4, 524293 is 5/8).
+    """
+    start, sigs, on = (4, 4), [], False
+    with open(path, errors="replace") as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("TEMPO ") and not on:
+                a = s.split()
+                if len(a) >= 4:
+                    start = (int(float(a[2])), int(float(a[3])))
+            if s.startswith("<TEMPOENVEX"):
+                on = True
+                continue
+            if on:
+                if s == ">":
+                    break
+                if s.startswith("PT "):
+                    a = s.split()
+                    if len(a) > 4:
+                        code = int(a[4])
+                        num, den = code & 0xFFFF, code >> 16
+                        if num and den:
+                            sigs.append((float(a[1]), num, den))
+    return start, sigs
+
+
+def rpp_beat_at_seconds(pts: list[tuple[float, float, int]], t: float) -> float:
+    """Beats from the start of the project to a moment, ramps linear in time."""
+    beat = 0.0
+    for i, (t0, bpm, shape) in enumerate(pts):
+        last = i + 1 == len(pts)
+        t1 = math.inf if last else pts[i + 1][0]
+        end = bpm if (last or shape != 0) else pts[i + 1][1]
+        if t <= t1 + 1e-9 or last:
+            dt = t - t0
+            now = bpm + (end - bpm) * dt / (t1 - t0) if end != bpm else bpm
+            return beat + dt * (bpm + now) / 120
+        beat += (t1 - t0) * (bpm + end) / 120
+    return beat
+
+
+@dataclass
+class ShortBar:
+    """A bar the project leaves short, because the next time signature starts partway through it."""
+    seconds: float      # where the project's next time signature starts
+    beat: float         # the same moment, in beats from the start
+    missing: float      # beats REAPER's export adds to make the short bar whole
+    shift: float        # beats everything after here is pushed late, counting earlier short bars
+
+
+def project_short_bars(rpp: str) -> list[ShortBar]:
+    """Bars a REAPER project leaves short, where a time signature lands partway through a bar.
+
+    REAPER plays a short bar as it is, but its MIDI export makes every bar whole: it
+    pads the short bar to full length and pushes everything after it late by the
+    difference. Found on Listening Forward (2026-10-12): a 3/4 marker 79.15 beats into
+    a 4/4 section, so the export added 0.85 of a beat at 200 BPM and the rest of the
+    song came out 254 ms late against the project and its render.
+    """
+    pts = rpp_tempo_points(rpp)
+    start, sigs = rpp_time_signatures(rpp)
+    out, shift = [], 0.0
+    prev_beat, (num, den) = 0.0, start
+    for t, n_, d_ in sigs:
+        beat = rpp_beat_at_seconds(pts, t)
+        bar = num * 4 / den
+        bars = (beat - prev_beat) / bar
+        part = bars - math.floor(bars)
+        if beat - prev_beat > 1e-6 and 1e-4 < part < 1 - 1e-4:
+            missing = (1 - part) * bar
+            shift += missing
+            out.append(ShortBar(t, beat, missing, shift))
+        prev_beat, num, den = beat, n_, d_
+    return out
+
+
+def _shift_at(bars: list[ShortBar], division: float, tick: float) -> float:
+    """Beats the export pushed this tick late: the shift of the last short bar it comes after."""
+    s = 0.0
+    for b in bars:
+        if tick >= (b.beat + b.shift) * division - 2:
+            s = b.shift
+    return s
+
+
+def export_has_short_bar_fault(mf: MidiFile, bars: list[ShortBar]) -> bool:
+    """True when the file's tempo map has REAPER's padding: a tempo change where each padded
+    bar's next section starts, and none where the project starts it."""
+    if not bars or mf.smpte:
+        return False
+    ticks = sorted([t for t, _ in _tempo_list(mf)] + [t for t, _, _ in time_signatures(mf)])
+
+    def near(x):
+        return any(abs(t - x) <= 2 for t in ticks)
+
+    return all(near((b.beat + b.shift) * mf.division) and not near(b.beat * mf.division) for b in bars
+               if b.beat * mf.division <= (ticks[-1] if ticks else 0))
+
+
+def match_project_bars(mf: MidiFile, rpp: str) -> tuple[MidiFile, list[ShortBar]]:
+    """Move everything REAPER's export pushed late back to where the project plays it.
+
+    Returns the corrected copy and the short bars it undid; an empty list means this
+    file does not have the fault (nothing changed). The time signature lands partway
+    through the bar again, exactly as in the project.
+    """
+    bars = project_short_bars(rpp)
+    if not export_has_short_bar_fault(mf, bars):
+        return mf, []
+    div = mf.division
+    tracks = []
+    for events in mf.tracks:
+        moved = [Event(int(round(e.tick - _shift_at(bars, div, e.tick) * div)), e.raw) for e in events]
+        moved.sort(key=lambda e: e.tick)  # stable; the mapping keeps order everywhere but the empty padding
+        tracks.append(moved)
+    return MidiFile(mf.header, mf.fmt, div, tracks, mf.smpte), bars
 
 
 def rpp_seconds_at_beat(pts: list[tuple[float, float, int]]):
@@ -745,12 +953,25 @@ def compare_project(mf: MidiFile, rpp: str) -> list[str]:
         if abs(d) > abs(worst):
             worst, at = d, tick
     where = bar_beat(at, mf.division, time_signatures(mf))
+    bars = project_short_bars(rpp)
+    if export_has_short_bar_fault(mf, bars):  # first: at one steady tempo the beats still match
+        return [f"Does NOT match the project {os.path.basename(rpp)}. Problem in REAPER's export:"] + \
+            short_bar_sentences(mf, rpp, bars) + [
+                "Fixing it with this project moves everything back to where the project plays it."]
     if abs(worst) < 1:
         return [f"Tempo matches the project {os.path.basename(rpp)}: " + _same_moment("every beat", worst)]
     return [
         f"Tempo does NOT match the project {os.path.basename(rpp)}: up to {worst:+.0f} ms off, at {where}.",
         "Usually that means the project's tempo was changed after this file was exported.",
     ]
+
+
+def needs_project_fix(path: str, rpp: str) -> bool:
+    """True when fixing this file with this project would undo REAPER's padded short bars."""
+    try:
+        return export_has_short_bar_fault(read_midi(path), project_short_bars(rpp))
+    except (MidiError, OSError, ValueError):
+        return False
 
 
 def _same_moment(what: str, worst_ms: float, capital: bool = False) -> str:
@@ -845,8 +1066,11 @@ SAME_MS = 2.0  # below this, timing differences are tick rounding (Logic saves a
 
 
 def compare_with(mf: MidiFile, path: str) -> list[str]:
-    """Compare against another MIDI file, or a REAPER project, chosen by its extension."""
+    """Compare against another MIDI file, a REAPER project, or a recording, chosen by its extension."""
     name = os.path.basename(path)
     if path.lower().endswith(".rpp"):
         return compare_project(mf, path)
+    from . import audio  # numpy is only needed for audio, so only loaded for it
+    if path.lower().endswith(audio.AUDIO_EXTENSIONS):
+        return audio.compare_audio(mf, path)
     return compare_midi(mf, read_midi(path), name)

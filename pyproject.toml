@@ -12,7 +12,8 @@ requires-python = ">=3.9"
 dependencies = []
 
 [project.optional-dependencies]
-app = ["wxPython>=4.2"]
+app = ["wxPython>=4.2", "numpy"]
+audio = ["numpy"]
 
 [project.scripts]
 midi-tempo = "midi_tempo.cli:run"

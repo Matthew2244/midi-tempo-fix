@@ -1,6 +1,6 @@
 # MIDI Tempo Fix
 
-You save a MIDI file in one app, open it in another, and the notes drift away from the click after a tempo change. Or a note that held in one app gets cut short in the next. MIDI Tempo Fix finds out why and fixes it. It works on the file itself, so it helps wherever the file goes next: Logic, Pro Tools, REAPER, Cubase, Ableton Live, Studio One, MuseScore, Sibelius, a hardware sequencer, anything that reads MIDI files.
+You save a MIDI file in one app, open it in another, and the notes drift away from the click after a tempo change. Or a note that held in one app gets cut short in the next. Or the MIDI you send a string arranger doesn't line up with the mix you sent with it. MIDI Tempo Fix finds out why and fixes it. It works on the file itself, so it helps wherever the file goes next: Logic, Pro Tools, REAPER, Cubase, Ableton Live, Studio One, MuseScore, Sibelius, a hardware sequencer, anything that reads MIDI files.
 
 ![MIDI Tempo Fix on a Mac after checking a folder of 20 MIDI files. The Files list shows three rows starting "Needs fixing", each saying "tempo on the wrong track", followed by rows starting "Clean". Below it, the report opens with "Checked 20 files: 3 need fixing, 17 clean" in bold, then each file's verdict in bold with its details underneath. Buttons along the bottom: Fix and save cleaned copies, Show cleaned files, Compare with another file.](docs/screenshot.png)
 
@@ -14,6 +14,7 @@ In the tempo map:
 
 - **Two different tempos on the same tick.** The MIDI rules say the second one wins, but some apps keep the first and play the wrong tempo from there on. Drum-loop libraries often start with a default 120 BPM followed by the real tempo on the same tick, which can put a loop seconds off. REAPER's export can do it at the end of a ramp; Logic drifted almost a second over one song. The same tempo written twice is harmless and left alone.
 - **Tempo changes on the wrong track.** In a multi-track file the tempo map belongs on the first track, and some apps only look there; anything else plays at the default 120 BPM. Score apps such as LilyPond write the tempo on every instrument track instead. The fix moves it to the first track and merges the identical copies. Time signatures copied onto every track are fine and left alone.
+- **A bar REAPER's export made whole.** When a time signature starts partway through a bar, REAPER plays that bar short. Its MIDI export makes the bar full length instead, so everything after it comes out late: 254 ms in one song, enough to hear against strings. The file alone can't show this, so compare it with the REAPER project it came from. The report names the bar, and Fix moves everything back to where the project plays it.
 - **REAPER ramp notes.** REAPER hides text notes in its exports ("REAPER gradual tempo change start ...") so that its own import can rebuild each ramp. That rebuild puts the end of a ramp in the wrong place when the ramp ends on a time signature change; one song came back half a second off. Other apps ignore the notes, and without them REAPER reads the exact steps like everyone else.
 
 In the notes:
@@ -28,11 +29,22 @@ Fixes never move a note's start, key or velocity, and never touch controllers, t
 
 It reads every kind of Standard MIDI File, including Windows .rmi files (the cleaned copy is saved as a plain .mid) and files that count time in video frames instead of beats.
 
+## Does it line up with the recording?
+
+Choose the MIDI file, press **Compare with another file**, and pick the recording it should match: a WAV, AIFF, MP3, M4A, FLAC or CAF. The MIDI can be one part of the recording, like a piano part against the full mix, and the recording can start earlier or end later. You get one of these answers:
+
+- **Lines up**, and how closely. Note attacks can be measured to about 10 to 20 ms, so that's what "lines up" means.
+- **An offset**: the recording is later or earlier by the same amount all the way through, so sliding one fixes it.
+- **A jump** at one place, with the time and bar. When the MIDI rests across it, the report gives the range of the rest. A jump with no tempo change usually means time was added or removed. If the MIDI came from REAPER, compare it with the project next: that is usually the bar its export made whole.
+- **A different tempo**, section by section: "the audio is slower, about 155 BPM where the MIDI says 160", and how far apart they've drifted by the end of each section. That means the two came from different versions of the tempo map.
+
+It follows the harmony first, so it can track a recording that wanders a long way from the MIDI, then checks the note attacks to the millisecond. A five-minute song takes about two seconds.
+
 ## Did an app change my file?
 
 **Compare with another file** answers that. Save the same music from two places, for example your export and the file another app saved after importing it, and compare them. It reports whether the tempo matches beat by beat, whether the same notes are there, and how far any note moved. Different track layouts don't matter. Differences under 2 ms are rounding no one can hear (some apps save at a lower resolution) and are reported as matching.
 
-You can also compare against a REAPER project (.rpp), which reads the project's tempo map directly. That's useful for confirming an export matches the session it came from.
+You can also compare against a REAPER project (.rpp), which reads the project's tempo map directly. That confirms an export matches the session it came from, and catches the bar REAPER's export made whole. After that comparison, **Fix and save cleaned copies** moves everything back to where the project plays it.
 
 ## Download
 
@@ -50,7 +62,7 @@ Get the latest version from the [Releases page](../../releases):
 2. The **Files** list shows every file with its status first ("Needs fixing: name, what's wrong" or "Clean: name"), files that need fixing at the top. Arrow through it to hear each verdict, and select a file to read everything about it in the report.
 3. The report starts with the answer: each file is either "clean" or "needs fixing", with the problems named. The details follow. With more than one file, a summary line comes first ("Checked 40 files: 3 need fixing, 37 clean"). With more than 20, only the files that need fixing are listed, so the report stays short enough to listen to. Focus moves to the report, so your screen reader reads it right away. Big folders are checked in the background on every processor core (a 5,000-file library takes about four seconds on a recent Mac), with a progress bar, progress in the title bar, and the count spoken now and then. **Stop** (or Escape) ends a batch early and keeps the results so far.
 4. If something needs fixing, press **Fix and save cleaned copies** (Command-S or Control-S). The report says where each copy went, and **Show cleaned files** (Command-Shift-S or Control-Shift-S) opens that folder with them selected.
-5. **Compare with another file** (Command-R or Control-R) compares the chosen files with any other MIDI file or a REAPER project.
+5. **Compare with another file** (Command-R or Control-R) compares the chosen files with a recording, any other MIDI file, or a REAPER project. A recording takes a few seconds per file; the window says so while it listens, and Escape stops.
 6. **Copy report** (Command-Shift-C or Control-Shift-C) puts the whole report on the clipboard, ready to paste into a message. **File, Save report as text** saves it as a file. **Help, MIDI Tempo Fix Help** opens this page.
 
 **Bigger text:** View, Bigger Text (Command-equals or Control-equals) makes the list, report, labels and checkbox larger; Smaller Text and Actual Size undo it. The size is remembered. Verdicts and summaries are bold, so the answer stands out by weight as well as by words; nothing relies on colour.
@@ -76,23 +88,25 @@ midi-tempo check song.mid
 midi-tempo check "Exports folder" --brief -r
 midi-tempo check export.mid --compare "after another app.mid"
 midi-tempo check export.mid --compare "My Song.RPP"
+midi-tempo check export.mid --compare "mix.wav"
+midi-tempo fix export.mid --project "My Song.RPP"
 midi-tempo fix song.mid
 midi-tempo fix "Exports folder"
 midi-tempo fix --tempo-only song.mid
 ```
 
-Both commands use every processor core but one; `--jobs 1` keeps it to one. `--json` prints the results in a form scripts and other tools can read. `check` starts each file with its verdict, and puts a summary line first when there's more than one. `--brief` gives one line per file. `-r` also looks inside folders within folders. `check` changes nothing. It exits with 0 when files are clean, 1 when something needs fixing, and 2 when a file can't be read. `fix` takes files or folders and saves a cleaned copy of each file that needs one. The command line needs nothing beyond Python itself. To open the app from a pip install, add the app extra (`pip install "midi-tempo-fix[app] @ git+https://github.com/Matthew2244/midi-tempo-fix"`) and run `midi-tempo-fix`.
+Both commands use every processor core but one; `--jobs 1` keeps it to one. `--json` prints the results in a form scripts and other tools can read. `check` starts each file with its verdict, and puts a summary line first when there's more than one. `--brief` gives one line per file. `-r` also looks inside folders within folders. `check` changes nothing. It exits with 0 when files are clean, 1 when something needs fixing, and 2 when a file can't be read. `fix` takes files or folders and saves a cleaned copy of each file that needs one. The command line needs nothing beyond Python itself, except checking against a recording, which needs numpy (`pip install numpy`). The app includes it. Recordings other than WAV are converted with afconvert on a Mac, or ffmpeg if it's installed. To open the app from a pip install, add the app extra (`pip install "midi-tempo-fix[app] @ git+https://github.com/Matthew2244/midi-tempo-fix"`) and run `midi-tempo-fix`.
 
 Output is plain sentences, printed once per command, so a screen reader doesn't get interrupted mid-sentence.
 
 ## How it's tested
 
-Before each release it runs against more than 17,000 real MIDI files from many apps and libraries, and thousands of deliberately broken ones. Every cleaned copy has to pass its own read-back check, compare as identical to the original apart from what was fixed, and have nothing left to fix.
+Before each release it runs against more than 17,000 real MIDI files from many apps and libraries, and thousands of deliberately broken ones. The recording check is tested on synthetic songs with known offsets, jumps and tempo changes, and on real songs whose answers were measured by hand. Every cleaned copy has to pass its own read-back check, compare as identical to the original apart from what was fixed, and have nothing left to fix.
 
 ## Building it yourself
 
 ```
-python -m pip install wxPython pyinstaller pytest certifi
+python -m pip install wxPython pyinstaller pytest certifi numpy
 python -m pytest
 python build_app.py
 ```

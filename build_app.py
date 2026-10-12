@@ -13,7 +13,7 @@ from midi_tempo import __version__
 NAME = "MIDI Tempo Fix"
 args = [
     sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
-    "--name", NAME, "--collect-data", "certifi", "app.py",
+    "--name", NAME, "--collect-data", "certifi", "--hidden-import", "midi_tempo.audio", "app.py",
 ]
 SIGN_ID = os.environ.get("MIDI_TEMPO_FIX_SIGN_ID")  # set by tools/release_mac.py; empty means ad-hoc
 if sys.platform == "darwin":

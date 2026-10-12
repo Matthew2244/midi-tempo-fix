@@ -3,8 +3,10 @@
     midi-tempo check FILE.mid [FILE.mid ...]   report the tempo map and any problems
     midi-tempo check A.mid --compare B.mid     also compare with another MIDI file (any app)
     midi-tempo check A.mid --compare X.RPP     ... or with a REAPER project
+    midi-tempo check A.mid --compare mix.wav   ... or with a recording: does it line up, and if not, how
     midi-tempo check FOLDER --brief -r         one line per file, folders within folders too
     midi-tempo fix FILE.mid [FILE.mid ...]     save a cleaned copy next to each original
+    midi-tempo fix A.mid --project X.RPP       ... also undo REAPER's padded short bars
 
 Checks the tempo map (doubled tempos, REAPER ramp notes, tempo on the wrong
 track) and the notes (duplicates, overlaps, stuck notes, stray releases).
@@ -23,8 +25,8 @@ from . import __version__
 import json
 
 from .batch import check_many, fix_many
-from .core import (MidiError, compare_with, describe, fix_file, midi_files, problems, read_midi, summary,
-                   verdict)
+from .core import (MidiError, compare_with, describe, fix_file, midi_files, needs_project_fix, problems, read_midi,
+                   summary, verdict)
 
 
 def as_json(path: str, name: str, r, notes: bool, compare: list[str] | None) -> dict:
@@ -66,12 +68,19 @@ def cmd_check(a) -> int:
             unreadable += 1
             status = 2
         else:
-            cmp = compare_with(read_midi(path), a.compare) if a.compare else None
+            try:
+                cmp = compare_with(read_midi(path), a.compare) if a.compare else None
+            except (MidiError, OSError, ValueError) as e:
+                cmp = [f"Could not compare with {os.path.basename(a.compare)}: {e}."]
+                status = 2
             records.append(as_json(path, name, r, notes, cmp))
             lines += [verdict(r, notes)] if a.brief else describe(r, notes)
             if cmp:
                 lines += cmp
-            if r.tempo_needs_fix or (notes and r.notes.fixable):
+            padded = bool(a.compare) and a.compare.lower().endswith(".rpp") and needs_project_fix(path, a.compare)
+            if padded and not a.brief:
+                lines.append(f'To fix: midi-tempo fix "{path}" --project "{a.compare}"')
+            if r.tempo_needs_fix or (notes and r.notes.fixable) or padded:
                 needs += 1
                 status = max(status, 1)
         if not a.brief:
@@ -97,12 +106,12 @@ def cmd_fix(a) -> int:
     lines, status = [], 0
     if a.output:
         try:
-            lines += fix_file(paths[0], a.output, notes=not a.tempo_only)[1]
+            lines += fix_file(paths[0], a.output, notes=not a.tempo_only, project=a.project)[1]
         except (MidiError, OSError) as e:
             lines.append(f"{os.path.basename(paths[0])}: not fixed, {e}.")
             status = 2
     else:
-        results, _ = fix_many([(p, not a.tempo_only) for p in paths], workers=a.jobs)
+        results, _ = fix_many([(p, not a.tempo_only, a.project) for p in paths], workers=a.jobs)
         for path, out, said, perm in results:
             if perm is not None:
                 said = [f"{os.path.basename(path)}: not fixed, no permission to save next to it ({perm})."]
@@ -125,7 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("files", nargs="+", help="MIDI files, or folders of them.")
     c.add_argument(
         "--compare", "--project", metavar="FILE",
-        help="Another MIDI file of the same music (from any app), or a REAPER project, to compare timing with.",
+        help="What to compare timing with: a recording of the same music (WAV, AIFF, MP3 and more; needs numpy), "
+             "another MIDI file from any app, or a REAPER project.",
     )
     c.add_argument("--tempo-only", action="store_true", help="Check the tempo map only, not the notes.")
     c.add_argument("--brief", action="store_true", help="One line per file: clean, or what needs fixing.")
@@ -136,6 +146,11 @@ def main(argv: list[str] | None = None) -> int:
     f = sub.add_parser("fix", help="Save a cleaned copy next to each original.")
     f.add_argument("files", nargs="+", help="MIDI files, or folders of them. Never changed.")
     f.add_argument("-o", "--output", help="Where to save the cleaned copy (one file only).")
+    f.add_argument(
+        "--project", metavar="X.RPP",
+        help="The REAPER project the file was exported from. Undoes the export's padded short bars, where a "
+             "time signature starts partway through a bar, so the copy plays exactly where the project does.",
+    )
     f.add_argument("--tempo-only", action="store_true", help="Fix the tempo map only and leave the notes alone.")
     f.add_argument("-r", "--recursive", action="store_true", help="Also look inside folders within folders.")
     f.add_argument("-j", "--jobs", type=int, default=None, help="How many processor cores to use.")

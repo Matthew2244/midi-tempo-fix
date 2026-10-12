@@ -8,7 +8,7 @@ A tool that checks and fixes Standard MIDI Files so every DAW plays them the sam
 
 Matthew's own copy of the command is `~/bin/midi-tempo`, a symlink to `midi-tempo` at the repo root, so the live tool and the repo can't drift. Edit the repo.
 
-## The three faults it fixes, and how each was proven
+## The three file faults it fixes, and how each was proven
 
 All found on 2026-10-11 from real REAPER 7.82 exports, measured rather than assumed:
 
@@ -17,6 +17,30 @@ All found on 2026-10-11 from real REAPER 7.82 exports, measured rather than assu
 3. **Tempo map events on a later track** of a format 1 file. Tempo changes are always moved to track 0. Time signatures only move when track 0 lacks one at that tick: notation apps copy them to every track and that is harmless. Key signatures are per-track by design and never move. (Version 1.0 counted all three and called 3,000 of 17,000 files broken; the scan below caught it.)
 
 Doubled tempo events only count when the values differ by more than 0.001 BPM. The same tempo written twice can't make apps disagree and is left alone. (1.0 flagged those too; 36 of the first 40 hits in the scan were this harmless kind.)
+
+## The fourth fault: a bar REAPER's export makes whole (needs the project)
+
+Found 2026-10-12 on Listening Forward. When a time signature marker lands partway through a bar, REAPER plays that bar short (here 79.15 beats into a 4/4 section, so the last bar was 3.15 beats). Its MIDI export makes the bar whole, so every event after the marker is pushed late by the missing 0.85 beat: 254 ms at 200 BPM. The tempo and time signature events move with it. Proven three ways: the project's own piano item notes (read from the `.RPP`, QN through the tempo envelope) against the export, 0.00 ms before the marker and +253.75 ms after, every note; the project's render against the export, a 253 ms step in the piano's rest across 4:14; and the corrected file against the render, within 10 to 15 ms everywhere.
+
+The file alone can't show it, so it is only found and fixed with the project: `project_short_bars()` walks the project's time signature points (`PT` field 5: numerator in the low 16 bits, denominator above), `export_has_short_bar_fault()` requires a tempo or time signature event where the padded section starts and none where the project starts it, and `match_project_bars()` moves every event back by the padding before it. The time signature then lands partway through the bar again, as in the project. `compare_project()` checks for it first (at one steady tempo the beats still match, so the tempo comparison alone misses it). `fix_file(project=...)` verifies by reading back: the tempo map matches the project at every quarter beat within 1 ms, and every note kept key, velocity and order and moved by exactly the padding before it. The app enables Fix for such files after a comparison with the project (`project_for`); the command takes `fix --project X.RPP`, and `check --compare X.RPP` prints the exact fix command.
+
+## Checking against a recording (`audio.py`)
+
+`compare_with()` sends audio extensions to `audio.compare_audio()`. numpy is required (lazy import; the command says how to get it, the app bundles it and its `--self-test` fails without it). WAV is read directly (8/16/24/32-bit PCM, float, extensible, RF64); anything else goes through `afconvert` (every Mac) or `ffmpeg`.
+
+Two passes:
+
+1. **Coarse:** chromagram of the audio (4096-point frames at 22,050 Hz, 50 to 2000 Hz folded to pitch classes, C = 0 like MIDI keys) against the MIDI notes' pitch classes (decaying, drums left out), aligned by subsequence DTW with steps (1,1), (1,2), (2,1), so the recording may start and end anywhere and run at half to twice the speed. Off-diagonal steps cost `STEP_PENALTY` 0.5: without it the path swung by whole beats. Quality (mean cost where the MIDI plays) over 0.75 means "not the same music". The lag is smoothed two ways: 4 s running median (search centre and local slope) and 20 s (trend).
+2. **Fine:** spectral flux every 88 samples (about 4 ms), against the MIDI's note starts in 12 s windows every 4 s. Each window scores every lag within `FINE_WIDE` 0.6 s of both the centre and the trend, following the local slope inside the window (a 3% tempo difference moves 360 ms over 12 s). The top 8 peaks plus "the trend" are candidates, and the windows choose together by Viterbi: a candidate costs its weakness (-log of peak over median) plus the cheaper of moving with the trend or staying put, scaled by `JUMP_COST` 0.01 s (+10% of the expected move).
+
+`describe_offsets()` smooths with a running median of 3, splits the curve into straight runs (top-down, tolerance 30 ms or 1.5% of the total spread), drops one-point runs between others (a window straddling a jump measures something in between) and short excursions that return to where they left (a passage matched a beat or half a beat off), merges runs with the same slope and no step, then says each run: lines up, a steady offset, or a different tempo in BPM. Between runs it says a jump only if the two lines don't meet near the boundary (if they meet, it's a tempo change). `_find_jump()` places a jump at a note: each note votes for the old or new lag, and among equally good splits the one across the longest rest wins; a rest over 2 s is reported as a range.
+
+Lessons, each a real bug found on real files:
+- **Hops must be whole numbers of samples.** 4 ms at 22,050 Hz rounds to 88 samples, 3.991 ms: every time read 0.23% late, which looked exactly like a tempo difference. `FINE_HOP` is defined in samples; the chroma hop is rounded the same way.
+- **Flux peaks 16 ms early** (a 46 ms window sees the attack before its centre reaches it), measured on synthetic plucks with 2.5 to 10 ms attacks. `audio_onsets()` shifts by that.
+- **Rhythm repeats every 8th and 16th.** In 8 s windows, Fresh Air's repeated figures fit a 16th off almost as well as on; Sound Between Us an 8th. Longer windows, a stronger cost on moving, and the excursion rule fixed it.
+- **The coarse path can be wrong at the end** where sparse chords sit half a beat apart (Fresh Air's last 15 s), and the trend inherits it. Searching around the trend as well as the centre, wide enough to reach the true lag, and making "stay put" always cheap fixed it.
+- Truth for tuning comes from 20 s windows scored at fixed lags, which repeating rhythm can't fool; every real pair was measured that way first. The bench: eight real MIDI and recording pairs from Matthew's album (kept on his Macs, never in this repo), all must read right, plus the synthetic tests in `tests/test_project_and_audio.py`.
 
 ## Reports are verdict first
 

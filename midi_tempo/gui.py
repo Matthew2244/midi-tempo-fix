@@ -22,11 +22,17 @@ from . import __version__, update
 from .batch import check_many, fix_many
 import webbrowser
 
-from .core import (MidiError, analyze, compare_with, describe, fix_file, midi_files, problems, read_midi,
-                   summary, verdict)
+from .core import (MidiError, analyze, compare_with, describe, fix_file, midi_files, needs_project_fix, problems,
+                   read_midi, summary, verdict)
 
 APP_NAME = "MIDI Tempo Fix"
 WILDCARD = "MIDI files (*.mid;*.midi;*.smf)|*.mid;*.midi;*.smf;*.MID;*.MIDI|All files|*.*"
+AUDIO_TYPES = (".wav", ".wave", ".aif", ".aiff", ".aifc", ".mp3", ".m4a", ".aac", ".flac", ".caf", ".ogg", ".opus")
+COMPARE_WILDCARD = (
+    "Recordings, MIDI files and REAPER projects|"
+    + ";".join(f"*{e};*{e.upper()}" for e in AUDIO_TYPES + (".mid", ".midi", ".smf", ".rmi", ".rpp"))
+    + "|All files|*.*"
+)
 INTRO = (
     "Checks MIDI files from any app for the tempo and note mistakes that make apps play them "
     "differently. Nothing changes until you press Fix, and your originals are never changed."
@@ -185,8 +191,8 @@ class MainFrame(wx.Frame):
         self.show_saved.SetToolTip("Opens the folder with the cleaned copies selected.")
         self.compare = wx.Button(panel, label="Com&pare with another file...")
         self.compare.SetToolTip(
-            "Compares timing with another MIDI file of the same music, from any app, or with a REAPER project. "
-            "Shows whether an app changed the tempo or moved any notes."
+            "Compares timing with another MIDI file of the same music from any app, a REAPER project, or a "
+            "recording (WAV, AIFF, MP3 and more). Shows whether anything moved, where, and why."
         )
         self.fix.Disable()
         self.compare.Disable()
@@ -239,6 +245,7 @@ class MainFrame(wx.Frame):
         self.show_saved.Bind(wx.EVT_BUTTON, lambda e: reveal(self.saved))
         self.notes.Bind(wx.EVT_CHECKBOX, self.on_notes_toggled)
         self.files, self.fixable, self.saved = [], [], []
+        self.project_for: dict[str, str] = {}  # file -> REAPER project whose padded short bars Fix undoes
         self.update_info = None
         wx.CallLater(1500, self.quiet_update_check)
         self.SetDropTarget(FileDrop(self))
@@ -480,6 +487,7 @@ class MainFrame(wx.Frame):
         self._set_busy(False)
         self.SetTitle(APP_NAME + (" (update available)" if self.update_info else ""))
         self.files = files
+        self.project_for = {}  # a new check starts fresh; comparing again with the project brings it back
         self.fixable = [p for p, r, err in results if r and (r.tempo_needs_fix or (notes and r.notes.fixable))]
         unreadable = sum(1 for _, r, _ in results if r is None)
         brief = len(files) > BRIEF_OVER
@@ -647,7 +655,8 @@ class MainFrame(wx.Frame):
         def work():
             progress = self._progress_reporter("fixing", "Fixed")
             try:
-                done, stopped = fix_many([(p, notes) for p in todo], progress=progress, stop=lambda: self.stopping)
+                done, stopped = fix_many([(p, notes, self.project_for.get(p)) for p in todo], progress=progress,
+                                         stop=lambda: self.stopping)
             except Exception as e:  # never leave the window stuck busy
                 wx.CallAfter(self._failed, f"Fixing stopped because of an unexpected error: {e}")
                 return
@@ -702,33 +711,75 @@ class MainFrame(wx.Frame):
             stem, ext = os.path.splitext(name)
             out = os.path.join(dlg.GetPath(), f"{stem} (tempo fixed){ext or '.mid'}")
         try:
-            return fix_file(p, out, notes=self.notes.GetValue())
+            return fix_file(p, out, notes=self.notes.GetValue(), project=self.project_for.get(p))
         except (MidiError, OSError) as e:
             return None, [f"{name}: not fixed, {e}."]
 
     def on_compare(self, _):
+        if self.busy:
+            return
         if not self.files:
             self.show([
                 "Choose MIDI files first, then compare them with another file.",
-                "For example, export from one app, import into another, export again, and compare the "
-                "two exports to see whether anything moved.",
+                "For example: a recording of the same music, to check the MIDI lines up with it; or export from "
+                "one app, import into another, export again, and compare the two exports.",
             ])
             return
         with wx.FileDialog(
-            self, "Choose the file to compare with: a MIDI file from any app, or a REAPER project",
-            wildcard="MIDI files and REAPER projects|*.mid;*.midi;*.smf;*.rmi;*.MID;*.MIDI;*.rpp;*.RPP|All files|*.*",
-            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+            self, "Choose what to compare with: a recording, a MIDI file from any app, or a REAPER project",
+            wildcard=COMPARE_WILDCARD, style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
         ) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
                 return
             other = dlg.GetPath()
-        lines = []
-        for p in self.files:
-            name = os.path.basename(p)
-            try:
-                lines += [f"{name} compared with {os.path.basename(other)}:"] + compare_with(read_midi(p), other) + [""]
-            except (MidiError, OSError) as e:
-                lines += [f"{name}: could not compare, {e}.", ""]
+        files = list(self.files)
+        is_audio = other.lower().endswith(AUDIO_TYPES)
+        started = time.time()
+        self._set_busy(True)
+        if is_audio:  # a few seconds a file: say so, so the wait is not silence
+            self.tell(f"Listening to {os.path.basename(other)} and lining up "
+                      f"{'the MIDI file' if len(files) == 1 else f'{len(files)} MIDI files'}. Escape stops.")
+
+        def work():
+            done = []
+            for i, p in enumerate(files):
+                if self.stopping:
+                    break
+                name = os.path.basename(p)
+                try:
+                    lines = [f"{name} compared with {os.path.basename(other)}:"] + compare_with(read_midi(p), other)
+                    padded = other.lower().endswith(".rpp") and needs_project_fix(p, other)
+                except (MidiError, OSError, ValueError) as e:
+                    lines, padded = [f"{name}: could not compare, {e}."], False
+                except Exception as e:  # never leave the window stuck busy
+                    lines, padded = [f"{name}: could not compare, unexpected error: {e}."], False
+                done.append((p, lines, padded))
+                if len(files) > 1:
+                    wx.CallAfter(self._show_progress, "comparing", i + 1, len(files))
+            wx.CallAfter(self._compared, other, done, len(files), started)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _compared(self, other, done, asked, started):
+        self._set_busy(False)
+        self.SetTitle(APP_NAME + (" (update available)" if self.update_info else ""))
+        lines, newly = [], 0
+        if len(done) < asked:
+            lines += [f"Stopped after {len(done)} of {asked} files.", ""]
+        for p, said, padded in done:
+            lines += said + [""]
+            if padded:
+                self.project_for[p] = other
+                if p not in self.fixable:
+                    self.fixable.append(p)
+                newly += 1
+        if newly:
+            lines.append("Press Fix and save cleaned copies to move " + ("it" if newly == 1 else "them") +
+                         " back to where the project plays.")
+        self.fix.Enable(bool(self.fixable))
+        self.compare.Enable(bool(self.files))
+        self.show_saved.Enable(bool(self.saved))
+        self._finished_signal(started)
         self.show(lines)
 
     # -------------------------------------------------------- updates
@@ -853,7 +904,15 @@ def main():
             t.join(30)  # a broken setup must fail the test, not hang it
             res = box.get("res", [])
         ok = len(res) == 12 and all(r[1] is not None for r in res) and last_run["parallel"]
-        print(f"{APP_NAME} {__version__} {'OK' if ok else 'PARALLEL FAILED'}, wxPython {wx.version()}")
+        try:  # the audio check needs numpy inside the app; a build that lost it must fail here
+            from . import audio
+            audio._np()
+            audio_ok = True
+        except Exception:
+            audio_ok = False
+        status = "OK" if ok and audio_ok else ("PARALLEL FAILED" if not ok else "AUDIO CHECK MISSING")
+        ok = ok and audio_ok
+        print(f"{APP_NAME} {__version__} {status}, wxPython {wx.version()}")
         if not ok:
             sys.exit(1)
         return

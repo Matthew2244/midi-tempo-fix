@@ -34,10 +34,10 @@ def _check_one(job: tuple[str, str]):
         return path, None, f"{name}: could not check it, {e}."
 
 
-def _fix_one(job: tuple[str, bool]):
-    path, notes = job
+def _fix_one(job: tuple):
+    path, notes, project = (job + (None,))[:3]  # (path, notes) or (path, notes, REAPER project)
     try:
-        out, said = fix_file(path, notes=notes)
+        out, said = fix_file(path, notes=notes, project=project)
         return path, out, said, None
     except PermissionError as e:
         return path, None, None, str(e)
@@ -88,6 +88,6 @@ def check_many(jobs: list[tuple[str, str]], workers: int | None = None, progress
     return _run(_check_one, jobs, workers, progress, stop)
 
 
-def fix_many(jobs: list[tuple[str, bool]], workers: int | None = None, progress=None, stop=None):
+def fix_many(jobs: list[tuple], workers: int | None = None, progress=None, stop=None):
     """jobs: (path, fix notes too). Each result: (path, saved path or None, sentences, permission error)."""
     return _run(_fix_one, jobs, workers, progress, stop)
