@@ -503,23 +503,28 @@ def repair(mf: MidiFile, notes: bool = True) -> tuple[MidiFile, dict]:
             for ei, e in enumerate(tracks[ti]):
                 (moved if (ti, ei) in misplaced else stay).append(e)
             tracks[ti] = stay
-        changed["moved"] = len(moved)
         # Several tracks often carry identical copies (LilyPond writes the tempo on every
-        # instrument track); one copy on the first track is enough.
-        have = {(e.tick, e.raw) for e in tracks[0]}
-        unique = []
-        for e in sorted(moved, key=lambda e: e.tick):
-            if (e.tick, e.raw) not in have:
-                have.add((e.tick, e.raw))
-                unique.append(e)
-        changed["merged"] = len(moved) - len(unique)
-        changed["moved"] = len(unique)
-        moved = unique
+        # instrument track); one copy on the first track is enough. The LAST copy of each is
+        # the one kept: where tracks disagree on a tick, the last one read wins, and dropping
+        # a later copy would hand the win to a different tempo (training found two such files).
         first = [e for e in tracks[0] if e.meta_type != END_OF_TRACK]
         eot = [e for e in tracks[0] if e.meta_type == END_OF_TRACK]
-        merged = sorted(first + moved, key=lambda e: e.tick)  # stable: track 0's own events first
-        last = max([e.tick for e in merged] + [e.tick for e in eot] + [0])
-        tracks[0] = merged + [Event(last, b"\xff\x2f\x00")]
+        combined = sorted(first + moved, key=lambda e: e.tick)  # stable: track 0, then tracks in order
+        moved_ids = {id(e) for e in moved}
+        seen, keep = set(), []
+        for e in reversed(combined):
+            key = (e.tick, e.raw)
+            if e.meta_type in TEMPO_MAP_TYPES and key in seen:
+                continue  # an identical copy comes later on the same tick
+            seen.add(key)
+            keep.append(e)
+        keep.reverse()
+        kept_moved = sum(1 for e in keep if id(e) in moved_ids)
+        dropped_first = len(first) - (len(keep) - kept_moved)
+        changed["moved"] = kept_moved
+        changed["merged"] = len(moved) - kept_moved + dropped_first
+        last = max([e.tick for e in keep] + [e.tick for e in eot] + [0])
+        tracks[0] = keep + [Event(last, b"\xff\x2f\x00")]
 
     # 2. REAPER ramp notes
     for ti, events in enumerate(tracks):

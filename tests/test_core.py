@@ -311,7 +311,12 @@ def test_fuzz_random_broken_files(tmp_path):
             if rng.random() < 0.05:
                 ev.append(off(rng.randrange(0, 64 * PPQ), rng.randint(36, 84), ch))  # stray
         late = [(rng.randrange(0, 32 * PPQ), tempo(rng.uniform(60, 180)))] if rng.random() < 0.2 else []
-        p = write(tmp_path, f"f{i}.mid", smf([track(tm), track(ev + late)]))
+        tracks = [track(tm), track(ev + late)]
+        if rng.random() < 0.3:  # score-app style: tempo copies on more tracks, some disagreeing
+            copies = [(t, raw) for t, raw in tm if raw[1] in (0x51, 0x58) and rng.random() < 0.7]
+            copies += [(t, tempo(rng.uniform(40, 200))) for t, raw in tm if raw[1] == 0x51 and rng.random() < 0.2]
+            tracks.append(track(copies or [(0, tempo(100))]))
+        p = write(tmp_path, f"f{i}.mid", smf(tracks))
         out, _ = fix_file(p)
         if out:
             again = analyze(read_midi(out))
@@ -409,3 +414,19 @@ def test_identical_tempo_copies_on_every_track_become_one(tmp_path):
     assert [e.bpm() for e in fixed.tracks[0] if e.meta_type == 0x51] == pytest.approx([72, 96], abs=1e-3)
     assert sum(1 for e in fixed.tracks[0] if e.meta_type == 0x58) == 1
     assert all(e.meta_type not in (0x51, 0x58) for t in fixed.tracks[1:] for e in t)
+
+
+def test_merging_copies_keeps_the_tempo_that_wins(tmp_path):
+    # Found by training on a LilyPond hymn: tracks disagree on one tick (120, 60, then 120 again).
+    # The last one read wins (120); merging copies must not hand the win to 60.
+    t = 8 * PPQ
+    p = write(tmp_path, "conflict.mid", smf([
+        track([(0, text("Hymn", 3))]),
+        track(notes() + [(0, tempo(120)), (t, tempo(120)), (t, tempo(60))]),
+        track([(0, tempo(120)), (t, tempo(120))]),
+    ]))
+    before = analyze(read_midi(p))
+    out, said = fix_file(p)  # verifies note timing itself; raises if the winner changed
+    after = read_midi(out)
+    assert [round(e.bpm()) for e in after.tracks[0] if e.meta_type == 0x51 and e.tick == t][-1] == 120
+    assert before.length_seconds == pytest.approx(analyze(after).length_seconds, abs=1e-9)
