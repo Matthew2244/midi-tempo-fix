@@ -4,7 +4,7 @@ Built on wxPython because it draws the platform's own controls, so VoiceOver,
 NVDA, JAWS and Narrator read every button, field and menu natively.
 
 Layout, in tab order: what this does, Choose MIDI files, the report, Fix and
-save cleaned copies, Compare with a REAPER project. After any action, focus
+save cleaned copies, Show cleaned files, Compare with another file. After any action, focus
 goes to the report so a screen reader reads the result straight away.
 """
 from __future__ import annotations
@@ -19,14 +19,13 @@ import threading
 import time
 
 from . import __version__, update
-from .core import MidiError, analyze, compare_project, describe, fix_file, read_midi
+from .core import MidiError, analyze, compare_with, describe, fix_file, read_midi
 
 APP_NAME = "MIDI Tempo Fix"
 WILDCARD = "MIDI files (*.mid;*.midi;*.smf)|*.mid;*.midi;*.smf;*.MID;*.MIDI|All files|*.*"
 INTRO = (
-    "Checks MIDI files for the problems that make apps play them differently: "
-    "tempo map mistakes and note mistakes. Choose files to check. Nothing changes "
-    "until you press Fix, and your original files are never changed."
+    "Checks MIDI files from any app for the tempo and note mistakes that make apps play them "
+    "differently. Nothing changes until you press Fix, and your originals are never changed."
 )
 DAY = 24 * 3600
 
@@ -119,8 +118,11 @@ class MainFrame(wx.Frame):
         self.fix.SetToolTip("Saves a copy of each file that needs it, next to the original, named '(tempo fixed)'.")
         self.show_saved = wx.Button(panel, label="S&how cleaned files")
         self.show_saved.SetToolTip("Opens the folder with the cleaned copies selected.")
-        self.compare = wx.Button(panel, label="Compare with a REAPER &project...")
-        self.compare.SetToolTip("Checks the chosen files' tempo against a REAPER project's tempo map.")
+        self.compare = wx.Button(panel, label="Com&pare with another file...")
+        self.compare.SetToolTip(
+            "Compares timing with another MIDI file of the same music, from any app, or with a REAPER project. "
+            "Shows whether an app changed the tempo or moved any notes."
+        )
         self.fix.Disable()
         self.compare.Disable()
         self.show_saved.Disable()
@@ -157,7 +159,7 @@ class MainFrame(wx.Frame):
         m_open = f.Append(wx.ID_OPEN, "&Choose MIDI files...\tCtrl+O")
         m_fix = f.Append(wx.ID_SAVE, "&Fix and save cleaned copies\tCtrl+S")
         m_show = f.Append(wx.ID_ANY, "S&how cleaned files\tCtrl+Shift+S")
-        m_cmp = f.Append(wx.ID_ANY, "Compare with a REAPER &project...\tCtrl+R")
+        m_cmp = f.Append(wx.ID_ANY, "Com&pare with another file...\tCtrl+R")
         f.AppendSeparator()
         m_quit = f.Append(wx.ID_EXIT, "&Quit\tCtrl+Q")
         h = wx.Menu()
@@ -184,11 +186,17 @@ class MainFrame(wx.Frame):
         """
         self.report.SetValue("\n".join(lines).rstrip())
         self.report.SetInsertionPoint(0)
-        if self.FindFocus() is self.report:
-            self.choose.SetFocus()
-            wx.CallLater(150, self.report.SetFocus)
-        else:
-            self.report.SetFocus()
+
+        def land():
+            if self.FindFocus() is self.report:
+                self.choose.SetFocus()
+                wx.CallLater(150, self.report.SetFocus)
+            else:
+                self.report.SetFocus()
+
+        # Wait a moment: right after a file dialog closes, macOS hands focus back on its
+        # own, and VoiceOver then announced only "Report scroll area" without the text.
+        wx.CallLater(250, land)
 
     def check(self, paths: list[str], focus_report: bool = True):
         self.files = [p for p in paths if os.path.isfile(p)]
@@ -271,21 +279,25 @@ class MainFrame(wx.Frame):
 
     def on_compare(self, _):
         if not self.files:
-            self.show(["Choose MIDI files first, then compare them with a REAPER project."])
+            self.show([
+                "Choose MIDI files first, then compare them with another file.",
+                "For example, export from one app, import into another, export again, and compare the "
+                "two exports to see whether anything moved.",
+            ])
             return
         with wx.FileDialog(
-            self, "Choose the REAPER project to compare with",
-            wildcard="REAPER projects (*.rpp)|*.rpp;*.RPP|All files|*.*",
+            self, "Choose the file to compare with: a MIDI file from any app, or a REAPER project",
+            wildcard="MIDI files and REAPER projects|*.mid;*.midi;*.smf;*.rmi;*.MID;*.MIDI;*.rpp;*.RPP|All files|*.*",
             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
         ) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
                 return
-            rpp = dlg.GetPath()
+            other = dlg.GetPath()
         lines = []
         for p in self.files:
             name = os.path.basename(p)
             try:
-                lines += [f"{name}:"] + compare_project(read_midi(p), rpp) + [""]
+                lines += [f"{name} compared with {os.path.basename(other)}:"] + compare_with(read_midi(p), other) + [""]
             except (MidiError, OSError) as e:
                 lines += [f"{name}: could not compare, {e}.", ""]
         self.show(lines)

@@ -90,8 +90,9 @@ class Event:
 class MidiFile:
     header: bytes
     fmt: int
-    division: int
+    division: float  # ticks per quarter note; for SMPTE files, ticks per second (see smpte)
     tracks: list[list[Event]]
+    smpte: float | None = None  # frames per second when the file counts time in video frames
 
 
 from . import notes as notes_mod  # noqa: E402  (imported here: notes uses Event above)
@@ -117,8 +118,15 @@ def read_midi(path: str) -> MidiFile:
         raise MidiError("it is not a MIDI file")
     hlen = struct.unpack(">I", b[4:8])[0]
     fmt, ntr, div = struct.unpack(">HHH", b[8:14])
+    smpte = None
     if div & 0x8000:
-        raise MidiError("it counts time in SMPTE frames, not beats, so it has no tempo map to fix")
+        # SMPTE timing: time is frames x ticks per frame, and tempo events do not apply.
+        # Modelled as a fixed 60 BPM with that many ticks per "beat", so one beat is one second.
+        fps = -struct.unpack("b", bytes([div >> 8]))[0]
+        smpte = 29.97 if fps == 29 else float(fps)
+        div = smpte * (div & 0xFF)
+        if div <= 0:
+            raise MidiError("its timing header is corrupt")
     header = b[: 8 + hlen]
     i = 8 + hlen
     tracks: list[list[Event]] = []
@@ -156,7 +164,7 @@ def read_midi(path: str) -> MidiFile:
             tracks.append(events)
     except IndexError as e:
         raise MidiError("the file is cut short or corrupt") from e
-    return MidiFile(header, fmt, div, tracks)
+    return MidiFile(header, fmt, div, tracks, smpte)
 
 
 def write_midi(path: str, mf: MidiFile) -> None:
@@ -182,6 +190,8 @@ def n(count: int, word: str, plural: str | None = None) -> str:
 
 def _tempo_list(mf: MidiFile) -> list[tuple[int, float]]:
     """(tick, bpm) in playback order; for same-tick events the later one wins."""
+    if mf.smpte:
+        return [(0, 60.0)]
     ev = []
     for ti, events in enumerate(mf.tracks):
         for ei, e in enumerate(events):
@@ -233,7 +243,7 @@ def bar_beat(tick: int, division: int, sigs: list[tuple[int, int, int]]) -> str:
         sigs.insert(0, (0, 4, 4))
     bar = 1
     for i, (tk, num, den) in enumerate(sigs):
-        beat_len = division * 4 // den
+        beat_len = int(division * 4 // den)
         bar_len = num * beat_len
         end = sigs[i + 1][0] if i + 1 < len(sigs) else tick
         span = end - tk
@@ -273,6 +283,7 @@ class Report:
     misplaced: int = 0
     sigs: list[tuple[int, int, int]] = field(default_factory=list)
     notes: "notes_mod.NoteCounts" = None
+    smpte: float | None = None
 
     @property
     def tempo_needs_fix(self) -> bool:
@@ -293,7 +304,10 @@ def analyze(mf: MidiFile, name: str = "") -> Report:
         first_bpm=tempos[0][1] if tempos else None,
         length_seconds=seconds_at(tempos, mf.division, end),
         sigs=time_signatures(mf),
+        smpte=mf.smpte,
     )
+    if mf.smpte:
+        r.tempo_count, r.first_bpm = 0, None
     # doubled tempo events
     i = 0
     first_wins: list[tuple[int, float]] = []
@@ -334,7 +348,7 @@ def _misplaced(mf: MidiFile) -> list[tuple[int, int]]:
     track) and harmless when the first track has the same change; only ones the
     first track lacks are counted. Key signatures are per-track by design.
     """
-    if mf.fmt != 1 or len(mf.tracks) < 2:
+    if mf.fmt != 1 or len(mf.tracks) < 2 or mf.smpte:
         return []
     sig_ticks = {e.tick for e in mf.tracks[0] if e.meta_type == TIME_SIG}
     out = []
@@ -353,7 +367,12 @@ def _beats(ticks: int, division: int) -> str:
 def describe(r: Report, notes: bool = True) -> list[str]:
     """The report as plain sentences, one per line, for speech and for eyes."""
     lines = []
-    if r.first_bpm is None:
+    if r.smpte:
+        lines.append(
+            f"{r.name}: counts time in video frames ({r.smpte:g} per second) instead of beats, so it has "
+            f"no tempo map. Last note at {r.length_seconds:.1f} seconds. Its notes can still be checked."
+        )
+    elif r.first_bpm is None:
         lines.append(f"{r.name}: no tempo events, so every app plays it at 120 BPM.")
     else:
         lines.append(
@@ -384,8 +403,9 @@ def describe(r: Report, notes: bool = True) -> list[str]:
             )
     if r.hints:
         lines.append(
-            f"Problem for REAPER: {n(r.hints, 'ramp note')} left by REAPER's export. REAPER's import "
-            f"uses them to rebuild ramps and misplaces any ramp that ends on a time signature change."
+            f"Problem in REAPER: {n(r.hints, 'ramp note')} left by REAPER's export. When REAPER imports the "
+            f"file it rebuilds ramps from them, and puts any ramp that ends on a time signature change in "
+            f"the wrong place. Other apps ignore them."
         )
     if r.misplaced:
         lines.append(
@@ -623,18 +643,118 @@ def rpp_seconds_at_beat(pts: list[tuple[float, float, int]]):
 
 
 def compare_project(mf: MidiFile, rpp: str) -> list[str]:
+    """Compare a MIDI file's tempo map with a REAPER project's, beat by beat."""
     f = rpp_seconds_at_beat(rpp_tempo_points(rpp))
     tempos = _tempo_list(mf)
     end = max((e.tick for t in mf.tracks for e in t if e.is_note_on), default=0)
     worst, at = 0.0, 0
-    for tick in range(0, end + 1, max(1, mf.division // 4)):
+    for tick in range(0, end + 1, max(1, int(mf.division // 4))):
         d = (seconds_at(tempos, mf.division, tick) - f(tick / mf.division)) * 1000
         if abs(d) > abs(worst):
             worst, at = d, tick
     where = bar_beat(at, mf.division, time_signatures(mf))
     if abs(worst) < 1:
-        return [f"Matches {os.path.basename(rpp)}: worst difference {worst:+.2f} ms, at {where}."]
+        return [f"Tempo matches the project {os.path.basename(rpp)}: " + _same_moment("every beat", worst)]
     return [
-        f"Does NOT match {os.path.basename(rpp)}: up to {worst:+.0f} ms off, at {where}.",
+        f"Tempo does NOT match the project {os.path.basename(rpp)}: up to {worst:+.0f} ms off, at {where}.",
         "Usually that means the project's tempo was changed after this file was exported.",
     ]
+
+
+def _same_moment(what: str, worst_ms: float, capital: bool = False) -> str:
+    if abs(worst_ms) < 0.05:
+        verb = "lands" if what == "every beat" else "starts"
+        return f"{what.replace(' starts', '')} {verb} at exactly the same moment." if not capital else \
+            f"{what.replace(' starts', '')} starts at exactly the same moment."
+    return f"{what} within {abs(worst_ms):.1f} ms of the same moment, which is rounding no one can hear."
+
+
+def _timed_notes(mf: MidiFile) -> dict[tuple[int, int], list[float]]:
+    """Note start times in seconds, grouped by (channel, key), whatever track they are on."""
+    tempos = _tempo_list(mf)
+    out: dict[tuple[int, int], list[float]] = {}
+    for events in mf.tracks:
+        for e in events:
+            if e.raw[0] < 0xF0 and e.is_note_on:
+                out.setdefault((e.raw[0] & 0x0F, e.raw[1]), []).append(seconds_at(tempos, mf.division, e.tick))
+    for v in out.values():
+        v.sort()
+    return out
+
+
+KEY_NAMES = ["C", "C sharp", "D", "E flat", "E", "F", "F sharp", "G", "A flat", "A", "B flat", "B"]
+
+
+def _key_name(key: int) -> str:
+    return f"{KEY_NAMES[key % 12]} {key // 12 - 1}"
+
+
+def compare_midi(a: MidiFile, b: MidiFile, b_name: str) -> list[str]:
+    """Compare two MIDI files of the same music, from any app: tempo map, then every note's timing.
+
+    Typical use: export from one app, import into another, export again, and
+    compare the two exports to see whether the second app changed anything.
+    Tracks may be merged, split or renamed between apps; notes are matched by
+    channel and key, in order, so that does not matter.
+    """
+    lines = []
+    ta, tb = _tempo_list(a), _tempo_list(b)
+    end_a = max((e.tick for t in a.tracks for e in t if e.is_note_on), default=0)
+    beats = end_a / a.division
+    if not a.smpte and not b.smpte:
+        worst, at = 0.0, 0.0
+        steps = max(1, int(beats * 4))
+        for i in range(steps + 1):
+            beat = beats * i / steps
+            d = (seconds_at(tb, b.division, beat * b.division) - seconds_at(ta, a.division, beat * a.division)) * 1000
+            if abs(d) > abs(worst):
+                worst, at = d, beat
+        where = bar_beat(int(at * a.division), a.division, time_signatures(a))
+        if abs(worst) < SAME_MS:
+            lines.append(f"Tempo matches {b_name}: " + _same_moment("every beat", worst))
+        else:
+            lines.append(f"Tempo does NOT match {b_name}: up to {worst:+.0f} ms off, at {where}.")
+
+    na, nb = _timed_notes(a), _timed_notes(b)
+    count_a, count_b = sum(map(len, na.values())), sum(map(len, nb.values()))
+    worst, worst_key, worst_t = 0.0, None, 0.0
+    differ = []
+    for key in sorted(set(na) | set(nb)):
+        xa, xb = na.get(key, []), nb.get(key, [])
+        if len(xa) != len(xb):
+            differ.append((key, len(xa), len(xb)))
+        for s1, s2 in zip(xa, xb):
+            d = (s2 - s1) * 1000
+            if worst_key is None or abs(d) > abs(worst):
+                worst, worst_key, worst_t = d, key, s1
+    if count_a == count_b and not differ:
+        lines.append(f"Same {n(count_a, 'note')} in both.")
+    else:
+        lines.append(f"Different notes: {n(count_a, 'note')} here, {count_b} in {b_name}.")
+        for key, ca, cb in differ[:MAX_LISTED]:
+            lines.append(f"  {_key_name(key[1])} on channel {key[0] + 1}: {ca} here, {cb} there.")
+        if len(differ) > MAX_LISTED:
+            lines.append(f"  And {len(differ) - MAX_LISTED} more keys.")
+            lines.append("So many notes differ that these look like different versions of the music.")
+        return lines  # matching notes by order means nothing once the notes differ
+    if worst_key is not None:
+        if abs(worst) < SAME_MS:
+            lines.append(_same_moment("Every note starts", worst, capital=True))
+        else:
+            lines.append(
+                f"Notes move by up to {worst:+.0f} ms. The biggest is {_key_name(worst_key[1])} on channel "
+                f"{worst_key[0] + 1}, {worst_t:.1f} seconds in."
+            )
+    return lines
+
+
+REFERENCE_TYPES = (".mid", ".midi", ".smf", ".rmi", ".rpp")
+SAME_MS = 2.0  # below this, timing differences are tick rounding (Logic saves at half REAPER's resolution)
+
+
+def compare_with(mf: MidiFile, path: str) -> list[str]:
+    """Compare against another MIDI file, or a REAPER project, chosen by its extension."""
+    name = os.path.basename(path)
+    if path.lower().endswith(".rpp"):
+        return compare_project(mf, path)
+    return compare_midi(mf, read_midi(path), name)

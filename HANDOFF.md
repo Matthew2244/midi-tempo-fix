@@ -18,6 +18,10 @@ All found on 2026-10-11 from real REAPER 7.82 exports, measured rather than assu
 
 Doubled tempo events only count when the values differ by more than 0.001 BPM. The same tempo written twice can't make apps disagree and is left alone. (1.0 flagged those too; 36 of the first 40 hits in the scan were this harmless kind.)
 
+## SMPTE-timed files
+
+A file whose header counts time in video frames (division's top bit set) has no tempo map; tempo events in it do not apply. It is modelled as a fixed 60 BPM with frames × ticks-per-frame ticks per beat, so one beat is one second and every time calculation stays the same code. Tempo checks are skipped, notes are checked and fixed, and the original header is written back unchanged. 29 means 29.97 (drop frame).
+
 ## Note problems (`notes.py`)
 
 Duplicates, same-key overlaps, stuck notes and stray releases are fixed; zero-length notes are reported only. Rebuilding pairs note-offs first in, first out, merges same-start duplicates (first velocity, longest end), ends an overlapped note at the re-strike, and ends stuck notes at the track's last tick. At one tick it writes note-offs, then other events in their original order, then note-ons; a zero-length note keeps on-then-off. Only tracks with a fixable problem are rebuilt.
@@ -28,6 +32,7 @@ Verification for note fixes: every note start (track, moment, channel, key, firs
 
 - Scanned every MIDI file on Matthew's Studio: 17,371 paths, 17,074 readable. The other 297 are genuinely not MIDI (129 empty files, 165 plugin presets named .midi, 3 SMPTE-timed files). No parser bugs.
 - Ran `fix` on all of them: 1,566 fixed, 15,508 clean, **0 crashes, 0 failed verifications**.
+- 1.2 training: the same 17,371 paths through fix, then `compare_with(original, fixed)` and `compare_with(original, copy at double resolution)`. 17,077 readable (the 3 SMPTE files now included), 1,566 fixed, every comparison matched, 0 crashes.
 - `test_fuzz_random_broken_files`: 300 random files with doubled tempos, hints, sigs, overlaps, stuck and stray notes; also run once at 4,000 with another seed. Each must verify and fixing the fixed copy must find nothing.
 
 ## Updates (`update.py`)
@@ -44,7 +49,13 @@ REAPER's own MIDI export is exact: steps of 1/32 note, each at the average tempo
 - **Output is sentences, written once.** No "(s)" plurals (`n()` in core), no progress spam. A screen reader user hears one clean report.
 - **In the app, focus goes to the report after every action.** All actions are in the File menu with shortcuts as well as on buttons.
 
-## REAPER project comparison
+## Comparing (universal)
+
+`compare_with(mf, path)` picks by extension: any MIDI file goes to `compare_midi`, a `.rpp` to `compare_project`. The app's button and the command's `--compare` (alias `--project`) both use it. The point is app-neutral: export from one app, import into another, export again, compare the two.
+
+`compare_midi` checks the tempo map beat by beat (quarter-beat steps, each file at its own resolution, so a 480-PPQ Logic export compares cleanly with a 960-PPQ REAPER one), then every note: starts in seconds grouped by channel and key, matched in order, ignoring tracks because apps merge and split them. Differences under `SAME_MS` (2 ms) are tick rounding and count as matching. When the note counts differ it lists which keys and stops: matching by order means nothing once notes differ, and the "moved by" number would be garbage (it was, -322 seconds, before that early return).
+
+### REAPER project comparison
 
 `compare_project` reads a `.RPP`'s `<TEMPOENVEX>` points (`PT seconds bpm shape ...`; shape 0 = ramp to the next point, 1 = square) and computes beat times with ramps linear in time: beats = seconds × (start + end) / 120. That model was confirmed against REAPER's own export to the microsecond.
 
@@ -61,9 +72,10 @@ Tested with VoiceOver on macOS 26 on 2026-10-11, driving the real app with keyst
 
 - **The report needs an explicit label on macOS.** wx has no API for it, so VoiceOver said only "text". `mac_accessibility_label()` sets `accessibilityLabel` on the scroll view and its text view through the Objective-C runtime (ctypes, no extra dependency). It now says "Report, text". Windows readers take the name from the static label created just before the field, so keep that label directly before the report in creation order.
 - **A field that already has focus is not re-read when its text changes.** After Fix, VoiceOver kept reading the old report. `show()` steps focus to the Choose button and back after 150 ms when the report is already focused; VoiceOver then reads the new result in full.
-- **Tab order is creation order.** Buttons are created in on-screen order: Fix, Show cleaned files, Compare.
+- **Tab order is creation order.** Buttons are created in on-screen order: Fix, Show cleaned files, Compare with another file.
 - **The update dialog's second button must be titled exactly "Cancel".** macOS alerts give Escape only to a button with that title. As "Not now" (and earlier as Yes/No), Escape did nothing and the dialog could only be left by Install or by hunting for the other button. Found in the VoiceOver pass; checked fixed the same way.
 - **A checkbox reads its state** ("checked checkbox" / "unchecked"). Toggling it re-checks the files into the report without moving focus, so the user stays on the checkbox.
+- **Move focus to the report a moment after any dialog closes.** Right after a file dialog, macOS restores focus itself; setting it then made VoiceOver say only "Report scroll area" and skip the text. `show()` now defers the focus move by 250 ms; VoiceOver then reads the whole result after Choose and after Compare.
 - The saved line is short ("Saved next to the original as ...") because a full path is noise spoken aloud and clutter on screen. The command line keeps the full path for scripts.
 
 ## Not verified yet

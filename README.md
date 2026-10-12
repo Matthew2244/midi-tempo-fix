@@ -1,40 +1,42 @@
 # MIDI Tempo Fix
 
-You export a MIDI file with tempo changes, open it in another app, and the notes drift away from the click. Or a note that held in one app gets cut short in another. This tool finds out why and fixes it, so the file plays the same in REAPER, Logic, Pro Tools and anything else.
+You save a MIDI file in one app, open it in another, and the notes drift away from the click after a tempo change. Or a note that held in one app gets cut short in the next. MIDI Tempo Fix finds out why and fixes it. It works on the file itself, so it helps wherever the file goes next: Logic, Pro Tools, REAPER, Cubase, Ableton Live, Studio One, MuseScore, Sibelius, a hardware sequencer, anything that reads MIDI files.
 
 It runs on Mac and Windows, as an app or from the command line. Everything works with VoiceOver, NVDA, JAWS and Narrator, and just as well with a mouse.
 
 ## What goes wrong
 
-A MIDI file can't hold a smooth tempo ramp. DAWs write each ramp as lots of small fixed-tempo steps instead. Done right, every app plays those steps the same way. These are the things that break that:
+A MIDI file can't hold a smooth tempo ramp, so apps write each ramp as lots of small fixed-tempo steps. The decimal tempos you see inside a ramp (99.78, then 99.35) are those steps, and they keep the timing exact. When every app reads the steps the same way, the file plays the same everywhere. These are the things that break that.
 
-- **Two tempo changes on the same tick.** The MIDI rules say the second one wins. An app that keeps the first one plays the wrong tempo for the rest of the song. REAPER exports can do this at the end of a ramp, and Logic was measured drifting almost a second over one song because of it.
-- **REAPER's ramp notes.** REAPER hides text notes in its exports ("REAPER gradual tempo change start ...") so its own import can rebuild each ramp. That rebuild puts the end of a ramp in the wrong place when the ramp ends on a time signature change. One song came back half a second off. Other apps ignore these notes. Without them, REAPER reads the exact steps like everyone else.
-- **Tempo changes on the wrong track.** In a multi-track MIDI file the tempo map belongs on the first track, and some apps only look there. Time signatures copied onto every track are fine and left alone.
+In the tempo map:
 
-The notes can disagree between apps too:
+- **Two different tempos on the same tick.** The MIDI rules say the second one wins, but some apps keep the first and play the wrong tempo from there on. Drum-loop libraries often start with a default 120 BPM followed by the real tempo on the same tick, which can put a loop seconds off. REAPER's export can do it at the end of a ramp; Logic drifted almost a second over one song. The same tempo written twice is harmless and left alone.
+- **Tempo changes on the wrong track.** In a multi-track file the tempo map belongs on the first track, and some apps only look there. Time signatures copied onto every track are fine and left alone.
+- **REAPER ramp notes.** REAPER hides text notes in its exports ("REAPER gradual tempo change start ...") so that its own import can rebuild each ramp. That rebuild puts the end of a ramp in the wrong place when the ramp ends on a time signature change; one song came back half a second off. Other apps ignore the notes, and without them REAPER reads the exact steps like everyone else.
+
+In the notes:
 
 - **Duplicate notes:** the same key struck twice at the same moment. Some apps play both, some play one. The fix keeps one, as long as the longer of the two.
-- **Overlapping notes:** a key struck again before it was released. Apps disagree about which release ends which note, so note lengths change. The fix ends the earlier note where the key is struck again.
+- **Overlapping notes:** a key struck again before it was released. Apps disagree about which release ends which note, so lengths change. The fix ends the earlier note where the key is struck again.
 - **Stuck notes** that never end. Some apps cut them off, some hold them forever. The fix ends them at the end of their track.
 - **Stray note releases** with no note playing. Removed.
 - **Notes with no length** are reported but left alone, because no length is right for every case.
 
-Note fixes never move a note's start, key or velocity. If you only want the tempo map touched, turn off **Also check and fix notes** in the app, or use `--tempo-only` on the command line.
+Fixes never move a note's start, key or velocity, and never touch controllers, track names or markers. Your original file is never changed: the cleaned copy is saved next to it with "(tempo fixed)" added to the name, then read back to prove every note still starts at the same moment. To leave notes alone and fix only the tempo map, turn off **Also check and fix notes** in the app, or add `--tempo-only` on the command line.
 
-MIDI Tempo Fix removes those problems and leaves everything else alone: controllers, track names, markers and timing. It never changes your original file. It saves a cleaned copy next to it, with "(tempo fixed)" added to the name, then reads that copy back and checks that every event plays at the same moment it did before.
+It reads every kind of Standard MIDI File, including Windows .rmi files (the cleaned copy is saved as a plain .mid) and files that count time in video frames instead of beats.
 
-The decimal tempos you see inside a ramp (like 99.78, then 99.35) are normal. They're how the steps keep the timing exact.
+## Did an app change my file?
 
-Before each release it's run against more than 17,000 real MIDI files and thousands of deliberately broken ones, and every cleaned copy has to pass that same read-back check.
+**Compare with another file** answers that. Save the same music from two places, for example your export and the file another app saved after importing it, and compare them. It reports whether the tempo matches beat by beat, whether the same notes are there, and how far any note moved. Different track layouts don't matter. Differences under 2 ms are rounding no one can hear (some apps save at a lower resolution) and are reported as matching.
 
-It also reads Windows .rmi files, and saves the cleaned copy as a plain .mid that every app opens.
+You can also compare against a REAPER project (.rpp), which reads the project's tempo map directly. That's useful for confirming an export matches the session it came from.
 
 ## Download
 
 Get the latest version from the [Releases page](../../releases):
 
-- **Mac:** MIDI-Tempo-Fix-mac.zip. Unzip it and move MIDI Tempo Fix to Applications. The app isn't signed by Apple yet, so the first time you open it, macOS may say it can't check it. Control-click the app, choose Open, then Open again. Or run this once in Terminal:
+- **Mac:** MIDI-Tempo-Fix-mac.zip. Unzip it and move MIDI Tempo Fix to Applications. The app isn't signed by Apple yet, so the first time you open it macOS may say it can't check it. Control-click the app, choose Open, then Open again. Or run this once in Terminal:
 
   ```
   xattr -dr com.apple.quarantine "/Applications/MIDI Tempo Fix.app"
@@ -47,12 +49,11 @@ Get the latest version from the [Releases page](../../releases):
 ## Using the app
 
 1. Press **Choose MIDI files** (Command-O on Mac, Control-O on Windows) and pick one or more files. You can also drop files on the window, or on the app's Dock icon on a Mac.
-2. The report says what's in each file's tempo map and whether anything needs fixing. Focus moves to the report so your screen reader reads it right away.
+2. The report says what's in each file and whether anything needs fixing. Focus moves to the report, so your screen reader reads it right away.
 3. If something needs fixing, press **Fix and save cleaned copies** (Command-S or Control-S). The report says where each copy went, and **Show cleaned files** (Command-Shift-S or Control-Shift-S) opens that folder with them selected.
+4. **Compare with another file** (Command-R or Control-R) compares the chosen files with any other MIDI file or a REAPER project.
 
 **Updates:** once a day the app asks GitHub whether there's a newer version, and the report says so if there is. **Help, Check for Updates** downloads it, checks that it starts, and replaces the app you have. Nothing else is sent anywhere.
-
-**Compare with a REAPER project** (Command-R or Control-R) checks a MIDI file's tempo against a REAPER project's tempo map, beat by beat. It's useful for confirming an export matches the session it came from.
 
 ## Command line
 
@@ -66,7 +67,8 @@ Then:
 
 ```
 midi-tempo check song.mid
-midi-tempo check song.mid --project "My Song.RPP"
+midi-tempo check export.mid --compare "after another app.mid"
+midi-tempo check export.mid --compare "My Song.RPP"
 midi-tempo fix song.mid
 midi-tempo fix "Exports folder"
 midi-tempo fix --tempo-only song.mid
@@ -76,10 +78,14 @@ midi-tempo fix --tempo-only song.mid
 
 Output is plain sentences, printed once per command, so a screen reader doesn't get interrupted mid-sentence.
 
+## How it's tested
+
+Before each release it runs against more than 17,000 real MIDI files from many apps and libraries, and thousands of deliberately broken ones. Every cleaned copy has to pass its own read-back check, compare as identical to the original apart from what was fixed, and have nothing left to fix.
+
 ## Building it yourself
 
 ```
-python -m pip install wxPython pyinstaller pytest
+python -m pip install wxPython pyinstaller pytest certifi
 python -m pytest
 python build_app.py
 ```

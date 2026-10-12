@@ -314,3 +314,68 @@ def test_fuzz_random_broken_files(tmp_path):
             again = analyze(read_midi(out))
             assert not again.needs_fix, f"case {i} still needs fixing"
             assert fix_file(out, str(tmp_path / f"g{i}.mid"))[0] is None
+
+
+# ---------------------------------------------------------------- 1.2: comparing, SMPTE
+
+from midi_tempo.core import compare_with  # noqa: E402
+
+
+def smf_ppq(tracks_events, ppq, fmt=1):
+    """Like smf(), at any resolution: events are given in beats."""
+    out = []
+    for evs in tracks_events:
+        out.append(track([(round(b * ppq), raw) for b, raw in evs]))
+    return b"MThd" + struct.pack(">IHHH", 6, fmt, len(out), ppq) + b"".join(out)
+
+
+def song(shift_beat=None):
+    tm = [(0, tempo(90)), (8, tempo(120)), (16, tempo(72))]
+    ns = []
+    for i in range(32):
+        b = i + (0.5 if shift_beat == i else 0)
+        ns += [(b, bytes([0x90, 60 + i % 12, 100])), (b + 0.5, bytes([0x80, 60 + i % 12, 0]))]
+    return [tm, ns]
+
+
+def test_compare_two_midi_files_at_different_resolutions(tmp_path):
+    a = write(tmp_path, "a.mid", smf_ppq(song(), 960))
+    b = write(tmp_path, "b.mid", smf_ppq(song(), 480))  # what Logic would save
+    lines = compare_with(read_midi(a), b)
+    assert lines[0].startswith("Tempo matches b.mid")
+    assert "Same 32 notes in both." in lines
+    assert lines[-1] == "Every note starts at exactly the same moment."
+
+
+def test_compare_finds_a_moved_note_and_a_changed_tempo(tmp_path):
+    a = write(tmp_path, "a.mid", smf_ppq(song(), 960))
+    moved = write(tmp_path, "m.mid", smf_ppq(song(shift_beat=20), 960))
+    lines = compare_with(read_midi(a), moved)
+    assert any("Notes move by up to" in x for x in lines)
+    other = song()
+    other[0] = [(0, tempo(90)), (8, tempo(121)), (16, tempo(72))]
+    t = write(tmp_path, "t.mid", smf_ppq(other, 960))
+    assert compare_with(read_midi(a), t)[0].startswith("Tempo does NOT match")
+
+
+def test_compare_different_versions_says_so(tmp_path):
+    a = write(tmp_path, "a.mid", smf_ppq(song(), 960))
+    fewer = song()
+    fewer[1] = fewer[1][:20]
+    b = write(tmp_path, "b.mid", smf_ppq(fewer, 960))
+    lines = compare_with(read_midi(a), b)
+    assert any(x.startswith("Different notes: 32 notes here, 10 in b.mid") for x in lines)
+    assert not any("move by" in x for x in lines)
+
+
+def test_smpte_file_is_read_and_its_notes_checked(tmp_path):
+    body = vlq(0) + bytes([0x90, 60, 100]) + vlq(0) + bytes([0x90, 60, 100]) + vlq(40) + bytes([0x80, 60, 0])
+    body += vlq(0) + bytes([0x80, 60, 0]) + vlq(0) + b"\xff\x2f\x00"
+    div = struct.pack(">b", -25) + bytes([40])  # 25 frames a second, 40 ticks a frame
+    p = write(tmp_path, "smpte.mid", b"MThd" + struct.pack(">IHH", 6, 0, 1) + div + b"MTrk" + struct.pack(">I", len(body)) + body)
+    r = analyze(read_midi(p), "smpte.mid")
+    assert r.smpte == 25 and r.notes.duplicates == 1
+    assert "video frames" in describe(r)[0]
+    out, _ = fix_file(p)
+    assert open(out, "rb").read()[12:14] == div  # the timing header is kept
+    assert not analyze(read_midi(out)).needs_fix
