@@ -335,7 +335,8 @@ def analyze(mf: MidiFile, name: str = "") -> Report:
         if run and t[0] is not None and t[0] - run[-1][0] <= mf.division // 2:
             run.append(t)
             continue
-        if len(run) >= 3:
+        # a real ramp: at least three distinct moments, time passing, and the tempo actually moving
+        if len({t for t, _ in run}) >= 3 and run[-1][0] > run[0][0] and abs(run[-1][1] - run[0][1]) > 0.5:
             r.ramps.append(Ramp(run[0][0], run[-1][0], run[0][1], run[-1][1]))
         run = [t] if t[0] is not None else []
     # REAPER ramp notes and misplaced tempo map events
@@ -365,6 +366,12 @@ def _misplaced(mf: MidiFile) -> list[tuple[int, int]]:
             if e.meta_type == TEMPO or (e.meta_type == TIME_SIG and e.tick not in sig_ticks):
                 out.append((ti, ei))
     return out
+
+
+def bpm_text(bpm: float) -> str:
+    """90.0001 reads as 90: MIDI stores tempo as microseconds per beat, so whole tempos come back
+    a hair off. Kept to two decimals otherwise."""
+    return f"{round(bpm, 2):g}"
 
 
 def _beats(ticks: int, division: int) -> str:
@@ -409,7 +416,7 @@ def describe(r: Report, notes: bool = True) -> list[str]:
         lines.append("No tempo events, so every app plays it at 120 BPM.")
     else:
         lines.append(
-            f"{n(r.tempo_count, 'tempo event')}, starts at {r.first_bpm:g} BPM, "
+            f"{n(r.tempo_count, 'tempo event')}, starts at {bpm_text(r.first_bpm)} BPM, "
             f"last note at {r.length_seconds:.1f} seconds."
         )
     if r.ramps:

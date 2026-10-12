@@ -45,12 +45,17 @@ Get the latest version from the [Releases page](../../releases):
 ## Using the app
 
 1. Press **Choose MIDI files** (Command-O on Mac, Control-O on Windows) and pick one or more files, or **Choose a folder** (Command-Shift-O or Control-Shift-O) to check every MIDI file in it, including folders inside it. You can also drop files or folders on the window, or on the app's Dock icon on a Mac.
-2. The report starts with the answer: each file is either "clean" or "needs fixing", with the problems named. The details follow. With more than one file, a summary line comes first ("Checked 40 files: 3 need fixing, 37 clean"). With more than 20, only the files that need fixing are listed, so the report stays short enough to listen to. Focus moves to the report, so your screen reader reads it right away. Big folders are checked in the background, with progress in the title bar.
-3. If something needs fixing, press **Fix and save cleaned copies** (Command-S or Control-S). The report says where each copy went, and **Show cleaned files** (Command-Shift-S or Control-Shift-S) opens that folder with them selected.
-4. **Compare with another file** (Command-R or Control-R) compares the chosen files with any other MIDI file or a REAPER project.
-5. **Copy report** (Command-Shift-C or Control-Shift-C) puts the whole report on the clipboard, ready to paste into a message. **File, Save report as text** saves it as a file. **Help, MIDI Tempo Fix Help** opens this page.
+2. The **Files** list shows every file with its status first ("Needs fixing: name, what's wrong" or "Clean: name"), files that need fixing at the top. Arrow through it to hear each verdict, and select a file to read everything about it in the report.
+3. The report starts with the answer: each file is either "clean" or "needs fixing", with the problems named. The details follow. With more than one file, a summary line comes first ("Checked 40 files: 3 need fixing, 37 clean"). With more than 20, only the files that need fixing are listed, so the report stays short enough to listen to. Focus moves to the report, so your screen reader reads it right away. Big folders are checked in the background, with progress in the title bar.
+4. If something needs fixing, press **Fix and save cleaned copies** (Command-S or Control-S). The report says where each copy went, and **Show cleaned files** (Command-Shift-S or Control-Shift-S) opens that folder with them selected.
+5. **Compare with another file** (Command-R or Control-R) compares the chosen files with any other MIDI file or a REAPER project.
+6. **Copy report** (Command-Shift-C or Control-Shift-C) puts the whole report on the clipboard, ready to paste into a message. **File, Save report as text** saves it as a file. **Help, MIDI Tempo Fix Help** opens this page.
 
-The app remembers whether notes are checked and which folder you last chose files from.
+**Bigger text:** View, Bigger Text (Command-equals or Control-equals) makes the list, report, labels and checkbox larger; Smaller Text and Actual Size undo it. The size is remembered. Verdicts and summaries are bold, so the answer stands out by weight as well as by words; nothing relies on colour.
+
+When a long batch finishes, the app plays a sound and bounces its Dock icon, in case you've switched to something else.
+
+The app remembers whether notes are checked, your text size, and which folder you last chose files from.
 
 **Updates:** once a day the app asks GitHub whether there's a newer version, and the report says so if there is. **Help, Check for Updates** downloads it, checks that it starts, and replaces the app you have. Nothing else is sent anywhere.
 

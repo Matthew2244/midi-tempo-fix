@@ -441,3 +441,13 @@ def test_json_output(tmp_path, capsys):
     f = data["files"][0]
     assert data["need_fixing"] == 1 and f["problems"] == ["two tempos on one tick"] and not f["clean"]
     assert f["doubled_tempos"][0]["winning_bpm"] == pytest.approx(95, abs=0.01)
+
+
+def test_several_tempos_at_one_moment_are_not_a_ramp(tmp_path):
+    p = write(tmp_path, "z.mid", smf([track([(0, tempo(90)), (0, tempo(90)), (0, tempo(90))]), track(notes())]))
+    assert analyze(read_midi(p)).ramps == []
+
+
+def test_whole_tempos_read_as_whole_numbers():
+    from midi_tempo.core import bpm_text
+    assert bpm_text(60e6 / round(60e6 / 90)) == "90" and bpm_text(118.749097) == "118.75"

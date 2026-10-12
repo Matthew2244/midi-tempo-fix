@@ -21,7 +21,8 @@ import time
 from . import __version__, update
 import webbrowser
 
-from .core import MidiError, analyze, compare_with, describe, fix_file, midi_files, read_midi, summary, verdict
+from .core import (MidiError, analyze, compare_with, describe, fix_file, midi_files, problems, read_midi,
+                   summary, verdict)
 
 APP_NAME = "MIDI Tempo Fix"
 WILDCARD = "MIDI files (*.mid;*.midi;*.smf)|*.mid;*.midi;*.smf;*.MID;*.MIDI|All files|*.*"
@@ -145,13 +146,13 @@ class FileDrop(wx.FileDropTarget):
 
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title=APP_NAME, size=(760, 560))
+        super().__init__(None, title=APP_NAME, size=(820, 760))
         self.files: list[str] = []
         self.fixable: list[str] = []
         self.saved: list[str] = []
 
-        panel = wx.Panel(self)
-        intro = wx.StaticText(panel, label=INTRO)
+        panel = self.panel = wx.Panel(self)
+        intro = self.intro = wx.StaticText(panel, label=INTRO)
         intro.Wrap(700)
 
         self.choose = wx.Button(panel, label="&Choose MIDI files...")
@@ -162,6 +163,13 @@ class MainFrame(wx.Frame):
         self.cfg = wx.Config(APP_NAME)
         self.notes.SetValue(self.cfg.ReadBool("check_notes", True))  # remembered between runs
         self.notes.SetToolTip("When off, only the tempo map is checked and fixed, and notes are left exactly as they are.")
+
+        files_label = wx.StaticText(panel, label="F&iles")
+        self.list = wx.ListBox(panel, style=wx.LB_SINGLE, name="Files")
+        self.list.SetToolTip("Each file and its verdict, files that need fixing first. "
+                             "Select one to read everything about it in the report.")
+        mac_accessibility_label(self.list, "Files")
+        self.entries: list[tuple] = []  # (path, report or None, error or None), in list order
 
         report_label = wx.StaticText(panel, label="&Report")
         self.report = wx.TextCtrl(
@@ -195,8 +203,10 @@ class MainFrame(wx.Frame):
         pick.Add(self.choose_dir, 0)
         s.Add(pick, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         s.Add(self.notes, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        s.Add(files_label, 0, wx.LEFT | wx.RIGHT, 12)
+        s.Add(self.list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, 12)
         s.Add(report_label, 0, wx.LEFT | wx.RIGHT, 12)
-        s.Add(self.report, 1, wx.EXPAND | wx.ALL, 12)
+        s.Add(self.report, 2, wx.EXPAND | wx.ALL, 12)
         s.Add(buttons, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         panel.SetSizer(s)
         self.CreateStatusBar()
@@ -204,6 +214,12 @@ class MainFrame(wx.Frame):
 
         self._menus()
         self.choose_dir.Bind(wx.EVT_BUTTON, self.on_choose_dir)
+        self.list.Bind(wx.EVT_LISTBOX, self.on_select_file)
+        self._texts = [intro, files_label, report_label]
+        self.text_pt = self.cfg.ReadInt("text_size", 0) or self.report.GetFont().GetPointSize()
+        self.default_pt = self.report.GetFont().GetPointSize()
+        self._apply_text_size()
+        self.panel.Bind(wx.EVT_SIZE, self._rewrap)
         self.choose.Bind(wx.EVT_BUTTON, self.on_choose)
         self.fix.Bind(wx.EVT_BUTTON, self.on_fix)
         self.compare.Bind(wx.EVT_BUTTON, self.on_compare)
@@ -237,6 +253,14 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_check_updates, m_upd)
         bar.Append(f, "&File")
         bar.Append(ed, "&Edit")
+        v = wx.Menu()
+        m_big = v.Append(wx.ID_ANY, "&Bigger Text\tCtrl+=")
+        m_small = v.Append(wx.ID_ANY, "&Smaller Text\tCtrl+-")
+        m_actual = v.Append(wx.ID_ANY, "&Actual Size\tCtrl+0")
+        bar.Append(v, "&View")
+        self.Bind(wx.EVT_MENU, lambda e: self._text_size(+2), m_big)
+        self.Bind(wx.EVT_MENU, lambda e: self._text_size(-2), m_small)
+        self.Bind(wx.EVT_MENU, lambda e: self._text_size(0), m_actual)
         bar.Append(h, "&Help")
         self.Bind(wx.EVT_MENU, self.on_choose_dir, m_dir)
         self.Bind(wx.EVT_MENU, self.on_copy_report, m_copy)
@@ -258,8 +282,7 @@ class MainFrame(wx.Frame):
         A screen reader only reads a field when focus arrives, so if the report
         already has focus, step away for a moment and come back.
         """
-        self.report.SetValue("\n".join(lines).rstrip())
-        self.report.SetInsertionPoint(0)
+        self.set_report(lines)
 
         def land():
             if self.FindFocus() is self.report:
@@ -271,6 +294,122 @@ class MainFrame(wx.Frame):
         # Wait a moment: right after a file dialog closes, macOS hands focus back on its
         # own, and VoiceOver then announced only "Report scroll area" without the text.
         wx.CallLater(250, land)
+
+    def set_report(self, lines: list[str]):
+        """Fill the report without moving focus. Verdict and summary lines are bold, so the
+        answer stands out by weight as well as by words; no meaning is carried by colour."""
+        text = "\n".join(lines).rstrip()
+        self.report.SetValue(text)
+        bold = wx.Font(self.report.GetFont())
+        bold.SetPointSize(self.text_pt)
+        bold.SetWeight(wx.FONTWEIGHT_BOLD)
+        pos, prev = 0, ""
+        for line in text.split("\n"):
+            # Only the first line of each section is bold: the summary, or a file's verdict.
+            # A run of verdicts (a big batch) stays plain after the first, or nothing stands out.
+            heading = line and not line.startswith("  ") and (pos == 0 or prev == "")
+            if heading:
+                self.report.SetStyle(pos, pos + len(line), wx.TextAttr(wx.NullColour, wx.NullColour, bold))
+            pos += len(line) + 1
+            prev = line
+        self.report.SetInsertionPoint(0)
+
+    # -------------------------------------------------------- text size (low vision)
+
+    def _apply_text_size(self):
+        # The list, report, intro, labels and checkbox all grow; buttons keep the system size,
+        # because a bigger font inside a fixed-height Mac button gets clipped.
+        for c in [self.list, self.report, self.notes] + self._texts:
+            f = c.GetFont()
+            f.SetPointSize(self.text_pt)
+            c.SetFont(f)
+        for c in [self.notes] + self._texts:  # let labels and the checkbox grow with their text
+            c.InvalidateBestSize()
+            c.SetMinSize(c.GetBestSize())
+        self._rewrap()
+        if self.report.GetValue():
+            self.set_report(self.report.GetValue().split("\n"))
+        self.Layout()
+
+    def _rewrap(self, event=None):
+        """Wrap the intro to the window's width, from the original text each time, so a bigger
+        font or a narrower window never pushes it past the right edge."""
+        if event:
+            event.Skip()
+        width = max(300, self.panel.GetClientSize().width - 30)
+        # Wrap by measuring each word in the label's current font. wx's own Wrap() on macOS kept
+        # measuring the old font after a size change, so large text ran off the right edge.
+        dc = wx.ClientDC(self.intro)
+        dc.SetFont(self.intro.GetFont())
+        lines, line = [], ""
+        for word in INTRO.split():
+            trial = f"{line} {word}".strip()
+            if line and dc.GetTextExtent(trial)[0] > width:
+                lines.append(line)
+                line = word
+            else:
+                line = trial
+        lines.append(line)
+        text = "\n".join(lines)
+        self.intro.SetLabel(text)
+        w, h = dc.GetMultiLineTextExtent(text)[:2]
+        self.intro.SetMinSize((w, h + 4))
+        self.panel.Layout()
+
+    def _text_size(self, step: int):
+        self.text_pt = self.default_pt if step == 0 else max(10, min(48, self.text_pt + step))
+        self.cfg.WriteInt("text_size", self.text_pt)
+        self.cfg.Flush()
+        self._apply_text_size()
+        self.tell(f"Text size {self.text_pt} points.")
+
+    # -------------------------------------------------------- the files list
+
+    def _fill_list(self, keep_selection: bool = False):
+        sel = self.list.GetSelection()
+        self.list.Set([self._entry_text(e) for e in self.entries])
+        if keep_selection and 0 <= sel < len(self.entries):
+            self.list.SetSelection(sel)
+
+    def _entry_text(self, entry) -> str:
+        path, r, err = entry[:3]
+        fixed = entry[3] if len(entry) > 3 else None
+        if r is None:
+            return err
+        if fixed:
+            return f"Fixed: {r.name}, saved as \"{os.path.basename(fixed)}\"."
+        found = problems(r, self.notes.GetValue())
+        # Status first: long names get cut off at the end of a list row, and a listener
+        # should hear the answer before the name.
+        return f"Needs fixing: {r.name}, {', '.join(found)}." if found else f"Clean: {r.name}"
+
+    def on_select_file(self, _):
+        i = self.list.GetSelection()
+        if not (0 <= i < len(self.entries)):
+            return
+        path, r, err = self.entries[i][:3]
+        if r is None:
+            self.set_report([err])
+            return
+        lines = describe(r, self.notes.GetValue())
+        fixed = self.entries[i][3] if len(self.entries[i]) > 3 else None
+        if fixed:
+            lines.append(f"A cleaned copy is saved next to it as \"{os.path.basename(fixed)}\".")
+        self.set_report(lines)
+
+    def _finished_signal(self, started: float):
+        """After a long batch: a sound and a Dock bounce, in case attention went elsewhere."""
+        if time.time() - started < 5:
+            return
+        self.RequestUserAttention()
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
+            elif sys.platform == "win32":
+                import winsound
+                winsound.MessageBeep()
+        except Exception:
+            pass
 
     def tell(self, text: str):
         """A short confirmation: spoken by VoiceOver, shown in the status bar."""
@@ -301,6 +440,8 @@ class MainFrame(wx.Frame):
         if len(files) > BRIEF_OVER:
             self.show([f"Checking {len(files)} MIDI files. Large folders take a while; progress is in the title bar."])
 
+        started = time.time()
+
         def work():
             results, last = [], time.time()
             for i, p in enumerate(files, 1):
@@ -315,11 +456,11 @@ class MainFrame(wx.Frame):
                     wx.CallAfter(self.SetTitle, f"{APP_NAME}: checking {i} of {len(files)}")
                     if i % 500 < 50:
                         wx.CallAfter(announce, f"Checked {i} of {len(files)}")
-            wx.CallAfter(self._checked, files, results, missing, notes, focus_report)
+            wx.CallAfter(self._checked, files, results, missing, notes, focus_report, started)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _checked(self, files, results, missing, notes, focus_report):
+    def _checked(self, files, results, missing, notes, focus_report, started=None):
         self._set_busy(False)
         self.SetTitle(APP_NAME + (" (update available)" if self.update_info else ""))
         self.files = files
@@ -338,7 +479,18 @@ class MainFrame(wx.Frame):
             else:
                 lines += describe(r, notes) + [""]
         if brief:
-            lines += ["", "Clean files are not listed. Choose a single file to hear everything about it."]
+            lines += ["", "Every file, clean ones too, is in the Files list. Select one to read everything about it."]
+        # Files list: needing a fix first, then unreadable, then clean; each keeps its folder order
+        fix_set = set(self.fixable)
+
+        def order(entry):
+            path, r, _ = entry
+            return 0 if path in fix_set else (1 if r is None else 2)
+
+        self.entries = sorted(results, key=order)  # sorted() is stable: folder order kept within each group
+        self._fill_list()
+        if started:
+            self._finished_signal(started)
         if self.fixable:
             lines.append("Press Fix and save cleaned copies to fix " +
                          ("it." if len(self.fixable) == 1 else f"all {len(self.fixable)}."))
@@ -419,6 +571,7 @@ class MainFrame(wx.Frame):
             self.show(["Nothing to fix. Choose MIDI files first."])
             return
         todo, notes = list(self.fixable), self.notes.GetValue()
+        started = time.time()
         self._set_busy(True)
         if len(todo) > BRIEF_OVER:
             self.show([f"Fixing {len(todo)} files. Progress is in the title bar."])
@@ -436,20 +589,21 @@ class MainFrame(wx.Frame):
                 if time.time() - last > 1:
                     last = time.time()
                     wx.CallAfter(self.SetTitle, f"{APP_NAME}: fixing {i} of {len(todo)}")
-            wx.CallAfter(self._fixed, done, notes)
+            wx.CallAfter(self._fixed, done, notes, started)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _fixed(self, done, notes):
+    def _fixed(self, done, notes, started=None):
         self._set_busy(False)
         self.SetTitle(APP_NAME + (" (update available)" if self.update_info else ""))
         brief = len(done) > BRIEF_OVER
-        lines, self.saved, failed = [], [], 0
+        lines, self.saved, failed, copy_of = [], [], 0, {}
         for p, out, said, perm in done:
             if perm is not None:  # can't write next to the original: ask where, here on the main thread
                 out, said = self._fix_elsewhere(p)
             if out:
                 self.saved.append(out)
+                copy_of[p] = out
                 if brief:
                     continue
                 where = "next to the original" if os.path.dirname(out) == os.path.dirname(p) else \
@@ -468,6 +622,10 @@ class MainFrame(wx.Frame):
         self.fix.Disable()
         self.show_saved.Enable(bool(self.saved))
         lines.append("Done. Your original files are unchanged. Show cleaned files opens their folder.")
+        self.entries = [(e[0], e[1], e[2], copy_of[e[0]]) if e[0] in copy_of else e for e in self.entries]
+        self._fill_list(keep_selection=True)
+        if started:
+            self._finished_signal(started)
         self.show(lines)
 
     def _fix_elsewhere(self, p: str):

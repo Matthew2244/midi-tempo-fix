@@ -22,6 +22,14 @@ Doubled tempo events only count when the values differ by more than 0.001 BPM. T
 
 Every file's report starts with one line a listener can stop after: "name: clean." or "name: needs fixing. 2 problems: two tempos on one tick, REAPER ramp notes." (`verdict()`), then the details. More than one file adds `summary()` on top ("Checked 40 files: 3 need fixing, 37 clean."). In the app, more than `BRIEF_OVER` (20) files lists only the verdicts of files needing fixing; the command's `--brief` does the same per file. Inside a chosen folder, names include the subfolder, since names repeat across folders.
 
+## The Files list, text size, and what low vision needs
+
+- **Files list** (`wx.ListBox`, labelled "Files" for VoiceOver like the report): one row per file, status first ("Needs fixing: name, problems." / "Clean: name" / "Fixed: name, saved as ..."), needing-fix first, then unreadable, then clean, folder order kept within each. Status comes first because long names are cut off at the end of a row, and a listener should hear the answer before the name. Selecting a row puts that file's full `describe()` in the report without moving focus. VoiceOver reads "Files table, row 1 of 61, Needs fixing: ...".
+- **Text size** (View menu, Ctrl/Cmd +, -, 0), 10 to 48 points, remembered in `wx.Config`. It scales the list, report, intro, labels and checkbox; buttons keep the system size, because a bigger font clips inside a fixed-height Mac button.
+- **wx on macOS lags a font change**: `StaticText.Wrap()` and `GetBestSize()` kept using the old font, so the intro ran off the right edge and lost its second line, and the checkbox label was cut off. `_rewrap()` wraps the intro by measuring words with a `ClientDC` in the current font and sets min sizes explicitly; it also runs on every resize. Found from screenshots at 21 points.
+- **Bold marks only section headings**: the first line of the report and the first line after a blank line (a file's verdict, the summary). Bolding every verdict line in a 300-file batch made everything bold and nothing stand out.
+- After a batch over 5 seconds: `RequestUserAttention()` (Dock bounce) and a system sound (Glass on Mac, MessageBeep on Windows).
+
 ## Batches in the app
 
 Checking and fixing run on a worker thread; every control is disabled meanwhile (`_set_busy`). Progress goes to the window title once a second, and roughly every 500 files `announce()` asks VoiceOver to say "Checked 1000 of 5343" (macOS AXAnnouncementRequested through the Objective-C runtime, like the report label; no extra dependency). Short confirmations (Report copied, Report saved) go to the status bar and `announce()`, so focus never moves. Files that can't be written next to their original are collected and handled after the worker, on the main thread, where the folder dialog can be shown. `reveal()` opens only the first copy when copies span more than three folders, so a big batch doesn't open dozens of Finder windows.
