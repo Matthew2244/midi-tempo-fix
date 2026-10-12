@@ -54,6 +54,8 @@ Get the latest version from the [Releases page](../../releases):
 4. **Compare with another file** (Command-R or Control-R) compares the chosen files with any other MIDI file or a REAPER project.
 5. **Copy report** (Command-Shift-C or Control-Shift-C) puts the whole report on the clipboard, ready to paste into a message. **File, Save report as text** saves it as a file. **Help, MIDI Tempo Fix Help** opens this page.
 
+The app remembers whether notes are checked and which folder you last chose files from.
+
 **Updates:** once a day the app asks GitHub whether there's a newer version, and the report says so if there is. **Help, Check for Updates** downloads it, checks that it starts, and replaces the app you have. Nothing else is sent anywhere.
 
 ## Command line
@@ -76,7 +78,7 @@ midi-tempo fix "Exports folder"
 midi-tempo fix --tempo-only song.mid
 ```
 
-`check` starts each file with its verdict, and puts a summary line first when there's more than one. `--brief` gives one line per file. `-r` also looks inside folders within folders. `check` changes nothing. It exits with 0 when files are clean, 1 when something needs fixing, and 2 when a file can't be read. `fix` takes files or folders and saves a cleaned copy of each file that needs one. The command line needs nothing beyond Python itself. To open the app from a pip install, add the app extra (`pip install "midi-tempo-fix[app] @ git+https://github.com/Matthew2244/midi-tempo-fix"`) and run `midi-tempo-fix`.
+`--json` prints the results in a form scripts and other tools can read. `check` starts each file with its verdict, and puts a summary line first when there's more than one. `--brief` gives one line per file. `-r` also looks inside folders within folders. `check` changes nothing. It exits with 0 when files are clean, 1 when something needs fixing, and 2 when a file can't be read. `fix` takes files or folders and saves a cleaned copy of each file that needs one. The command line needs nothing beyond Python itself. To open the app from a pip install, add the app extra (`pip install "midi-tempo-fix[app] @ git+https://github.com/Matthew2244/midi-tempo-fix"`) and run `midi-tempo-fix`.
 
 Output is plain sentences, printed once per command, so a screen reader doesn't get interrupted mid-sentence.
 

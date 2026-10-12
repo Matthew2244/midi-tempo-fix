@@ -430,3 +430,14 @@ def test_merging_copies_keeps_the_tempo_that_wins(tmp_path):
     after = read_midi(out)
     assert [round(e.bpm()) for e in after.tracks[0] if e.meta_type == 0x51 and e.tick == t][-1] == 120
     assert before.length_seconds == pytest.approx(analyze(after).length_seconds, abs=1e-9)
+
+
+def test_json_output(tmp_path, capsys):
+    import json as _json
+    from midi_tempo.cli import main
+    p = write(tmp_path, "j.mid", smf([track([(0, tempo(100)), (PPQ, tempo(90)), (PPQ, tempo(95))]), track(notes())]))
+    assert main(["check", p, "--json"]) == 1
+    data = _json.loads(capsys.readouterr().out)
+    f = data["files"][0]
+    assert data["need_fixing"] == 1 and f["problems"] == ["two tempos on one tick"] and not f["clean"]
+    assert f["doubled_tempos"][0]["winning_bpm"] == pytest.approx(95, abs=0.01)

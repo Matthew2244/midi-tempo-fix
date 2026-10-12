@@ -20,7 +20,27 @@ import os
 import sys
 
 from . import __version__
-from .core import MidiError, analyze, compare_with, describe, fix_file, midi_files, read_midi, summary, verdict
+import json
+
+from .core import (MidiError, analyze, compare_with, describe, fix_file, midi_files, problems, read_midi,
+                   summary, verdict)
+
+
+def as_json(path: str, name: str, r, notes: bool, compare: list[str] | None) -> dict:
+    c = r.notes
+    out = {
+        "file": path, "name": name, "clean": not problems(r, notes), "problems": problems(r, notes),
+        "verdict": verdict(r, notes), "tempo_events": r.tempo_count, "first_bpm": r.first_bpm,
+        "length_seconds": round(r.length_seconds, 3), "ramps": len(r.ramps),
+        "doubled_tempos": [{"tick": d.tick, "lost_bpm": round(d.lost_bpm, 4), "winning_bpm": round(d.winning_bpm, 4)}
+                           for d in r.doubled],
+        "reaper_ramp_notes": r.hints, "misplaced_tempo_events": r.misplaced, "smpte_fps": r.smpte,
+        "notes": {"duplicates": c.duplicates, "overlaps": c.overlaps, "stuck": c.stuck,
+                  "stray_releases": c.stray_offs, "zero_length": c.zero_length},
+    }
+    if compare is not None:
+        out["compare"] = compare
+    return out
 
 
 def cmd_check(a) -> int:
@@ -28,7 +48,7 @@ def cmd_check(a) -> int:
     if not paths:
         print("No MIDI files found there.")
         return 2
-    lines, status, needs, unreadable = [], 0, 0, 0
+    lines, status, needs, unreadable, records = [], 0, 0, 0, []
     notes = not a.tempo_only
     folders = [f.rstrip(os.sep) + os.sep for f in a.files if os.path.isdir(f)]
     for path in paths:
@@ -37,18 +57,25 @@ def cmd_check(a) -> int:
         try:
             mf = read_midi(path)
             r = analyze(mf, name)
+            cmp = compare_with(mf, a.compare) if a.compare else None
+            records.append(as_json(path, name, r, notes, cmp))
             lines += [verdict(r, notes)] if a.brief else describe(r, notes)
-            if a.compare:
-                lines += compare_with(mf, a.compare)
+            if cmp:
+                lines += cmp
             if r.tempo_needs_fix or (notes and r.notes.fixable):
                 needs += 1
                 status = max(status, 1)
         except (MidiError, OSError) as e:
             lines.append(f"{name}: could not check it, {e}.")
+            records.append({"file": path, "name": name, "error": str(e)})
             unreadable += 1
             status = 2
         if not a.brief:
             lines.append("")
+    if a.json:
+        print(json.dumps({"checked": len(paths), "need_fixing": needs, "unreadable": unreadable,
+                          "files": records}, indent=2, ensure_ascii=False))
+        return status
     if len(paths) > 1:
         lines = [summary(len(paths), needs, unreadable), ""] + lines
     print("\n".join(lines).rstrip())
@@ -90,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     c.add_argument("--tempo-only", action="store_true", help="Check the tempo map only, not the notes.")
     c.add_argument("--brief", action="store_true", help="One line per file: clean, or what needs fixing.")
+    c.add_argument("--json", action="store_true", help="Machine-readable results, for scripts and other tools.")
     c.add_argument("-r", "--recursive", action="store_true", help="Also look inside folders within folders.")
     f = sub.add_parser("fix", help="Save a cleaned copy next to each original.")
     f.add_argument("files", nargs="+", help="MIDI files, or folders of them. Never changed.")

@@ -159,7 +159,8 @@ class MainFrame(wx.Frame):
         self.choose_dir = wx.Button(panel, label="Choose a f&older...")
         self.choose_dir.SetToolTip("Checks every MIDI file in a folder, including folders inside it.")
         self.notes = wx.CheckBox(panel, label="Also check and fix &notes: duplicates, overlaps, stuck notes")
-        self.notes.SetValue(True)
+        self.cfg = wx.Config(APP_NAME)
+        self.notes.SetValue(self.cfg.ReadBool("check_notes", True))  # remembered between runs
         self.notes.SetToolTip("When off, only the tempo map is checked and fixed, and notes are left exactly as they are.")
 
         report_label = wx.StaticText(panel, label="&Report")
@@ -207,7 +208,7 @@ class MainFrame(wx.Frame):
         self.fix.Bind(wx.EVT_BUTTON, self.on_fix)
         self.compare.Bind(wx.EVT_BUTTON, self.on_compare)
         self.show_saved.Bind(wx.EVT_BUTTON, lambda e: reveal(self.saved))
-        self.notes.Bind(wx.EVT_CHECKBOX, lambda e: self.files and self.check(self.files, focus_report=False))
+        self.notes.Bind(wx.EVT_CHECKBOX, self.on_notes_toggled)
         self.files, self.fixable, self.saved = [], [], []
         self.update_info = None
         wx.CallLater(1500, self.quiet_update_check)
@@ -360,9 +361,25 @@ class MainFrame(wx.Frame):
             for c in (self.choose, self.choose_dir, self.notes):
                 c.Enable()
 
+    def on_notes_toggled(self, _):
+        self.cfg.WriteBool("check_notes", self.notes.GetValue())
+        self.cfg.Flush()
+        if self.files:
+            self.check(self.files, focus_report=False)
+
+    def _last_dir(self) -> str:
+        d = self.cfg.Read("last_dir", "")
+        return d if d and os.path.isdir(d) else ""
+
+    def _remember_dir(self, path: str):
+        self.cfg.Write("last_dir", path if os.path.isdir(path) else os.path.dirname(path))
+        self.cfg.Flush()
+
     def on_choose_dir(self, _):
-        with wx.DirDialog(self, "Choose a folder of MIDI files to check. Folders inside it are checked too.") as dlg:
+        with wx.DirDialog(self, "Choose a folder of MIDI files to check. Folders inside it are checked too.",
+                          defaultPath=self._last_dir()) as dlg:
             if dlg.ShowModal() == wx.ID_OK:
+                self._remember_dir(dlg.GetPath())
                 self.check([dlg.GetPath()])
 
     def on_copy_report(self, _):
@@ -388,10 +405,11 @@ class MainFrame(wx.Frame):
 
     def on_choose(self, _):
         with wx.FileDialog(
-            self, "Choose MIDI files to check", wildcard=WILDCARD,
+            self, "Choose MIDI files to check", wildcard=WILDCARD, defaultDir=self._last_dir(),
             style=wx.FD_OPEN | wx.FD_MULTIPLE | wx.FD_FILE_MUST_EXIST,
         ) as dlg:
             if dlg.ShowModal() == wx.ID_OK:
+                self._remember_dir(dlg.GetPaths()[0])
                 self.check(dlg.GetPaths())
 
     def on_fix(self, _):

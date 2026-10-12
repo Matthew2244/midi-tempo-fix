@@ -62,6 +62,10 @@ REAPER's own MIDI export is exact: steps of 1/32 note, each at the average tempo
 - **Output is sentences, written once.** No "(s)" plurals (`n()` in core), no progress spam. A screen reader user hears one clean report.
 - **In the app, focus goes to the report after every action.** All actions are in the File menu with shortcuts as well as on buttons.
 
+## Settings and scripting
+
+The app remembers, through `wx.Config`, whether notes are checked and the last folder files were chosen from, so dialogs open there. `midi-tempo check --json` prints machine-readable results (per-file problems, doubled tempos, note counts, optional comparison) for scripts and other tools.
+
 ## Comparing (universal)
 
 `compare_with(mf, path)` picks by extension: any MIDI file goes to `compare_midi`, a `.rpp` to `compare_project`. The app's button and the command's `--compare` (alias `--project`) both use it. The point is app-neutral: export from one app, import into another, export again, compare the two.
@@ -77,7 +81,10 @@ REAPER's own MIDI export is exact: steps of 1/32 note, each at the average tempo
 - `python -m pytest`: synthetic fixtures only. **No real music goes in this repo.**
 - `python build_app.py`: PyInstaller build for the current OS, zip in `dist/`, then runs the frozen app with `--self-test` (loads the window without showing it).
 - CI (`.github/workflows/build.yml`): tests on Linux, Mac and Windows with Python 3.9 and 3.13, then builds both apps. Pushing a `v*` tag attaches the zips to a GitHub release. Watch the run to green after every push.
-- The Mac build is ad-hoc signed only, for Apple silicon. The README gives the Gatekeeper and SmartScreen steps. Proper signing and notarization would need an Apple Developer ID certificate in CI secrets.
+- **Signing the Mac app (Developer ID + notarization) happens on the Studio, never in CI**, so the signing key and the App Store Connect key never leave that Mac. After CI has published a release (with an unsigned Mac zip), run `python tools/release_mac.py vX.Y.Z` on the Studio: it builds with `MIDI_TEMPO_FIX_SIGN_ID` set (PyInstaller signs every binary, `build_app.py` seals the bundle with the hardened runtime and a timestamp), verifies, submits to Apple's notary service with the API key from the Keychain entry `asc-api-key` (key 44L73HXU2W, issuer in the script), staples, checks Gatekeeper accepts it, self-tests, and replaces the release's Mac zip (`gh release upload --clobber`).
+- **The certificate has to come from the Account Holder.** The API returns 403 "can only be performed by the Account Holder" for `DEVELOPER_ID_APPLICATION_G2`. Either Matthew creates it in Xcode (Settings, Accounts, his team, Manage Certificates, +, Developer ID Application), or on developer.apple.com with the request file in iCloud Drive at "MIDI Tempo Fix/Apple signing/". That request's private key is already in the Studio's login Keychain, so the downloaded certificate pairs with it by double-clicking.
+- **The hardened runtime needs no entitlements.** Tested with a temporary signature on 2026-10-11: with only library validation relaxed (temporary signatures have no team), the app starts, draws its window, uses the Objective-C runtime for VoiceOver, and runs a full self-update. A real Developer ID gives every piece the same team, so library validation passes as it is.
+- Windows builds are unsigned; SmartScreen warns once. Signing them would need a code-signing certificate from a Windows certificate authority.
 
 ## Screen reader behaviour, and why the code looks the way it does
 

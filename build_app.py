@@ -15,8 +15,11 @@ args = [
     sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
     "--name", NAME, "--collect-data", "certifi", "app.py",
 ]
+SIGN_ID = os.environ.get("MIDI_TEMPO_FIX_SIGN_ID")  # set by tools/release_mac.py; empty means ad-hoc
 if sys.platform == "darwin":
     args += ["--osx-bundle-identifier", "io.github.matthew2244.miditempofix"]
+    if SIGN_ID:
+        args += ["--codesign-identity", SIGN_ID]
 subprocess.run(args, check=True)
 
 os.chdir("dist")
@@ -28,7 +31,13 @@ if sys.platform == "darwin":
     subprocess.run(["plutil", "-insert", "CFBundleDocumentTypes", "-json",
                     '[{"CFBundleTypeName":"MIDI file","CFBundleTypeRole":"Viewer",'
                     '"LSItemContentTypes":["public.midi-audio"],"LSHandlerRank":"Alternate"}]', plist], check=True)
-    subprocess.run(["codesign", "--force", "--deep", "--sign", "-", f"{NAME}.app"], check=True)
+    if SIGN_ID:
+        # PyInstaller already signed every binary inside; seal the bundle with the
+        # hardened runtime and a secure timestamp, both required for notarization.
+        subprocess.run(["codesign", "--force", "--options", "runtime", "--timestamp",
+                        "--sign", SIGN_ID, f"{NAME}.app"], check=True)
+    else:
+        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", f"{NAME}.app"], check=True)
     out = "MIDI-Tempo-Fix-mac.zip"
     subprocess.run(["ditto", "-c", "-k", "--keepParent", f"{NAME}.app", out], check=True)
     exe = f"{NAME}.app/Contents/MacOS/{NAME}"
