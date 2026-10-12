@@ -397,16 +397,20 @@ def problems(r: Report, notes: bool = True) -> list[str]:
     return out
 
 
-def verdict(r: Report, notes: bool = True) -> str:
-    """The answer first: one line a listener can stop after."""
-    found = problems(r, notes)
+PROJECT_PROBLEM = "REAPER made a short bar whole"  # found only by comparing with the project
+
+
+def verdict(r: Report, notes: bool = True, extra: tuple = ()) -> str:
+    """The answer first: one line a listener can stop after. extra: problems found elsewhere,
+    such as by comparing with the REAPER project."""
+    found = problems(r, notes) + list(extra)
     text = "clean." if not found else f"needs fixing. {n(len(found), 'problem')}: {', '.join(found)}."
     return f"{r.name}: {text}" if r.name else text[0].upper() + text[1:]
 
 
-def describe(r: Report, notes: bool = True) -> list[str]:
+def describe(r: Report, notes: bool = True, extra: tuple = ()) -> list[str]:
     """The report as plain sentences, one per line, for speech and for eyes. The verdict comes first."""
-    lines = [verdict(r, notes)]
+    lines = [verdict(r, notes, extra)]
     if r.smpte:
         lines.append(
             f"Counts time in video frames ({r.smpte:g} per second) instead of beats, so it has "
@@ -476,7 +480,7 @@ def describe(r: Report, notes: bool = True) -> list[str]:
                 f"Left alone: {n(c.zero_length, 'note')} with no length. Some apps skip these and some "
                 f"play a click, and no length is right for every case."
             )
-    if not problems(r, notes):
+    if not problems(r, notes) and not extra:
         lines.append("Every app should play this the same way.")
     return lines
 

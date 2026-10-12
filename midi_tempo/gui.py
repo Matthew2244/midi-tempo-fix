@@ -22,8 +22,8 @@ from . import __version__, update
 from .batch import check_many, fix_many
 import webbrowser
 
-from .core import (MidiError, analyze, compare_with, describe, fix_file, midi_files, needs_project_fix, problems,
-                   read_midi, summary, verdict)
+from .core import (PROJECT_PROBLEM, MidiError, analyze, compare_with, describe, fix_file, midi_files,
+                   needs_project_fix, problems, read_midi, summary, verdict)
 
 APP_NAME = "MIDI Tempo Fix"
 WILDCARD = "MIDI files (*.mid;*.midi;*.smf)|*.mid;*.midi;*.smf;*.MID;*.MIDI|All files|*.*"
@@ -403,10 +403,14 @@ class MainFrame(wx.Frame):
             return err
         if fixed:
             return f"Fixed: {r.name}, saved as \"{os.path.basename(fixed)}\"."
-        found = problems(r, self.notes.GetValue())
+        found = problems(r, self.notes.GetValue()) + list(self._extra(path))
         # Status first: long names get cut off at the end of a list row, and a listener
         # should hear the answer before the name.
         return f"Needs fixing: {r.name}, {', '.join(found)}." if found else f"Clean: {r.name}"
+
+    def _extra(self, path) -> tuple:
+        """Problems found by comparing with a REAPER project, which the file alone can't show."""
+        return (PROJECT_PROBLEM,) if path in self.project_for else ()
 
     def on_select_file(self, _):
         i = self.list.GetSelection()
@@ -416,7 +420,7 @@ class MainFrame(wx.Frame):
         if r is None:
             self.set_report([err])
             return
-        lines = describe(r, self.notes.GetValue())
+        lines = describe(r, self.notes.GetValue(), self._extra(path))
         fixed = self.entries[i][3] if len(self.entries[i]) > 3 else None
         if fixed:
             lines.append(f"A cleaned copy is saved next to it as \"{os.path.basename(fixed)}\".")
@@ -762,6 +766,7 @@ class MainFrame(wx.Frame):
 
     def _compared(self, other, done, asked, started):
         self._set_busy(False)
+        self.SetStatusText("")  # the "Listening to ..." line would read as still working
         self.SetTitle(APP_NAME + (" (update available)" if self.update_info else ""))
         lines, newly = [], 0
         if len(done) < asked:
@@ -779,6 +784,10 @@ class MainFrame(wx.Frame):
         self.fix.Enable(bool(self.fixable))
         self.compare.Enable(bool(self.files))
         self.show_saved.Enable(bool(self.saved))
+        if newly:  # the Files list said "Clean" for these; now it knows better
+            fix_set = set(self.fixable)
+            self.entries.sort(key=lambda e: 0 if e[0] in fix_set else (1 if e[1] is None else 2))
+            self._fill_list(keep_selection=True)
         self._finished_signal(started)
         self.show(lines)
 

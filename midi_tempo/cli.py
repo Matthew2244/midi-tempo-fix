@@ -25,15 +25,16 @@ from . import __version__
 import json
 
 from .batch import check_many, fix_many
-from .core import (MidiError, compare_with, describe, fix_file, midi_files, needs_project_fix, problems, read_midi,
-                   summary, verdict)
+from .core import (PROJECT_PROBLEM, MidiError, compare_with, describe, fix_file, midi_files, needs_project_fix,
+                   problems, read_midi, summary, verdict)
 
 
-def as_json(path: str, name: str, r, notes: bool, compare: list[str] | None) -> dict:
+def as_json(path: str, name: str, r, notes: bool, compare: list[str] | None, extra: tuple = ()) -> dict:
     c = r.notes
+    found = problems(r, notes) + list(extra)
     out = {
-        "file": path, "name": name, "clean": not problems(r, notes), "problems": problems(r, notes),
-        "verdict": verdict(r, notes), "tempo_events": r.tempo_count, "first_bpm": r.first_bpm,
+        "file": path, "name": name, "clean": not found, "problems": found,
+        "verdict": verdict(r, notes, extra), "tempo_events": r.tempo_count, "first_bpm": r.first_bpm,
         "length_seconds": round(r.length_seconds, 3), "ramps": len(r.ramps),
         "doubled_tempos": [{"tick": d.tick, "lost_bpm": round(d.lost_bpm, 4), "winning_bpm": round(d.winning_bpm, 4)}
                            for d in r.doubled],
@@ -73,11 +74,12 @@ def cmd_check(a) -> int:
             except (MidiError, OSError, ValueError) as e:
                 cmp = [f"Could not compare with {os.path.basename(a.compare)}: {e}."]
                 status = 2
-            records.append(as_json(path, name, r, notes, cmp))
-            lines += [verdict(r, notes)] if a.brief else describe(r, notes)
+            padded = bool(a.compare) and a.compare.lower().endswith(".rpp") and needs_project_fix(path, a.compare)
+            extra = (PROJECT_PROBLEM,) if padded else ()
+            records.append(as_json(path, name, r, notes, cmp, extra))
+            lines += [verdict(r, notes, extra)] if a.brief else describe(r, notes, extra)
             if cmp:
                 lines += cmp
-            padded = bool(a.compare) and a.compare.lower().endswith(".rpp") and needs_project_fix(path, a.compare)
             if padded and not a.brief:
                 lines.append(f'To fix: midi-tempo fix "{path}" --project "{a.compare}"')
             if r.tempo_needs_fix or (notes and r.notes.fixable) or padded:

@@ -149,3 +149,13 @@ def test_unrelated_audio_is_not_measured(tmp_path):
     wav = render(other, lambda b: b * 0.5, other[-1][0] * 0.5 + 3, tmp_path / "a.wav")
     said = " ".join(compare_with(read_midi(mid), wav))
     assert "not seem to be the same music" in said or "Does NOT line up" in said
+
+
+def test_check_with_the_project_says_needs_fixing(tmp_path, capsys):
+    from midi_tempo.cli import main
+    rpp = write(tmp_path, "song.RPP", RPP.encode())
+    mid = write(tmp_path, "song.mid", reaper_style_export(2))
+    assert main(["check", mid, "--compare", rpp]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("song.mid: needs fixing.") and "short bar whole" in out
+    assert "To fix: midi-tempo fix" in out

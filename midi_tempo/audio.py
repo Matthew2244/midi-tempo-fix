@@ -562,6 +562,7 @@ def describe_offsets(points, name: str, where, bpm_at, find_jump=None) -> list[s
         t0, t1 = seg[0][0], seg[-1][0]
         y0, y1 = a * t0 + b, a * t1 + b
         start = t0
+        jumped_here = False
         if prev is not None:
             pa, pb, pt1 = prev
             d0, d1 = (a * pt1 + b) - (pa * pt1 + pb), y0 - (pa * t0 + pb)
@@ -569,7 +570,7 @@ def describe_offsets(points, name: str, where, bpm_at, find_jump=None) -> list[s
             if meet is not None and pt1 - WINDOW <= meet <= t0 + WINDOW:
                 start = min(max(meet, pt1), t0)  # the two runs meet: a change of tempo, not a jump
             elif min(abs(d0), abs(d1)) > tol:
-                jumped = True
+                jumped = jumped_here = True
                 last, first = find_jump(pt1, t0, pa * pt1 + pb, y0) if find_jump else (pt1, t0)
                 start = first
                 # each side's level at the change itself; a steady side by the median of all its points,
@@ -582,20 +583,21 @@ def describe_offsets(points, name: str, where, bpm_at, find_jump=None) -> list[s
                 else:
                     at = f"At {where(first)}"
                 lines.append(f"  {at}, the timing jumps {_amount(gap)}: from there the audio is "
-                             f"{_amount(y0)} {_side(y0)} the MIDI.")
+                             f"{_amount(after)} {_side(after)} the MIDI.")
+        here = _clock(start) if jumped_here else where(start)
         if abs(a) >= 0.004 and abs(a) * (t1 - t0) > up:  # a slope is a tempo however wide the tolerance
             tempo_differs = True
             bpm = bpm_at((t0 + t1) / 2)
             rate = 1 + a  # audio seconds per MIDI second
             lines.append(
-                f"  {where(start)} to {_clock(t1)}: the audio is {'slower' if rate > 1 else 'faster'}, about "
+                f"  {here} to {_clock(t1)}: the audio is {'slower' if rate > 1 else 'faster'}, about "
                 f"{bpm / rate:.0f} BPM where the MIDI says {_bpm_words(bpm)} ({abs(rate - 1) * 100:.1f}%). "
                 f"By {_clock(t1)} it is {_amount(y1)} {_side(y1)} the MIDI.")
         elif abs(b + a * (t0 + t1) / 2) <= up:
-            lines.append(f"  {where(start)} to {_clock(t1)}: lines up.")
+            lines.append(f"  {here} to {_clock(t1)}: lines up.")
         else:
-            mid = a * (t0 + t1) / 2 + b
-            lines.append(f"  {where(start)} to {_clock(t1)}: the audio is {_amount(mid)} {_side(mid)} the MIDI "
+            mid = float(np.median([p[1] for p in seg])) if abs(a) < 0.004 else a * (t0 + t1) / 2 + b
+            lines.append(f"  {here} to {_clock(t1)}: the audio is {_amount(mid)} {_side(mid)} the MIDI "
                          f"throughout.")
         prev, prev_seg = (a, b, t1), seg
     if not tempo_differs and not jumped and all(line.endswith(": lines up.") for line in lines[1:]):
