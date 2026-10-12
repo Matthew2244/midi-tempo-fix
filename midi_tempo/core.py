@@ -61,18 +61,26 @@ def _vlq_write(v: int) -> bytes:
     return bytes(reversed(out))
 
 
-@dataclass
 class Event:
-    tick: int
-    raw: bytes  # status byte included, running status expanded
+    """One MIDI event: absolute tick and its raw bytes (status included, running status expanded).
+
+    meta_type is worked out once here; it is asked for hundreds of thousands of
+    times on a big piano file, and as a property it was a third of the check time.
+    """
+
+    __slots__ = ("tick", "raw", "meta_type")
+
+    def __init__(self, tick: int, raw: bytes):
+        self.tick = tick
+        self.raw = raw
+        self.meta_type = raw[1] if raw[0] == 0xFF and len(raw) > 1 else None
+
+    def __repr__(self) -> str:
+        return f"Event({self.tick}, {self.raw!r})"
 
     @property
     def is_meta(self) -> bool:
         return self.raw[0] == 0xFF
-
-    @property
-    def meta_type(self) -> int | None:
-        return self.raw[1] if self.is_meta else None
 
     def meta_data(self) -> bytes:
         ln, k = _vlq_read(self.raw, 2)
@@ -364,19 +372,44 @@ def _beats(ticks: int, division: int) -> str:
     return n(int(b), "beat") if b == int(b) else f"{b:.1f} beats"
 
 
+def problems(r: Report, notes: bool = True) -> list[str]:
+    """Short names of what needs fixing, for the one-line verdict."""
+    out = []
+    if r.doubled:
+        out.append("two tempos on one tick")
+    if r.misplaced:
+        out.append("tempo on the wrong track")
+    if r.hints:
+        out.append("REAPER ramp notes")
+    c = r.notes
+    if notes and c:
+        for count, word in ((c.duplicates, "duplicate notes"), (c.overlaps, "overlapping notes"),
+                            (c.stuck, "stuck notes"), (c.stray_offs, "stray note releases")):
+            if count:
+                out.append(word)
+    return out
+
+
+def verdict(r: Report, notes: bool = True) -> str:
+    """The answer first: one line a listener can stop after."""
+    found = problems(r, notes)
+    text = "clean." if not found else f"needs fixing. {n(len(found), 'problem')}: {', '.join(found)}."
+    return f"{r.name}: {text}" if r.name else text[0].upper() + text[1:]
+
+
 def describe(r: Report, notes: bool = True) -> list[str]:
-    """The report as plain sentences, one per line, for speech and for eyes."""
-    lines = []
+    """The report as plain sentences, one per line, for speech and for eyes. The verdict comes first."""
+    lines = [verdict(r, notes)]
     if r.smpte:
         lines.append(
-            f"{r.name}: counts time in video frames ({r.smpte:g} per second) instead of beats, so it has "
+            f"Counts time in video frames ({r.smpte:g} per second) instead of beats, so it has "
             f"no tempo map. Last note at {r.length_seconds:.1f} seconds. Its notes can still be checked."
         )
     elif r.first_bpm is None:
-        lines.append(f"{r.name}: no tempo events, so every app plays it at 120 BPM.")
+        lines.append("No tempo events, so every app plays it at 120 BPM.")
     else:
         lines.append(
-            f"{r.name}: {n(r.tempo_count, 'tempo event')}, starts at {r.first_bpm:g} BPM, "
+            f"{n(r.tempo_count, 'tempo event')}, starts at {r.first_bpm:g} BPM, "
             f"last note at {r.length_seconds:.1f} seconds."
         )
     if r.ramps:
@@ -436,9 +469,17 @@ def describe(r: Report, notes: bool = True) -> list[str]:
                 f"Left alone: {n(c.zero_length, 'note')} with no length. Some apps skip these and some "
                 f"play a click, and no length is right for every case."
             )
-    fixable = r.tempo_needs_fix or (notes and c and c.fixable)
-    lines.append("Needs fixing." if fixable else "Clean. Every app should play this the same way.")
+    if not problems(r, notes):
+        lines.append("Every app should play this the same way.")
     return lines
+
+
+def summary(checked: int, needs: int, unreadable: int = 0) -> str:
+    """One line for a batch, said before the details."""
+    parts = [f"{needs} need{'s' if needs == 1 else ''} fixing", f"{checked - needs - unreadable} clean"]
+    if unreadable:
+        parts.append(f"{unreadable} could not be read")
+    return f"Checked {n(checked, 'file')}: " + ", ".join(parts) + "."
 
 
 MAX_LISTED = 10
@@ -450,7 +491,8 @@ MAX_LISTED = 10
 def repair(mf: MidiFile, notes: bool = True) -> tuple[MidiFile, dict]:
     """Return a cleaned copy and counts of what changed. The input is not modified."""
     tracks = [list(t) for t in mf.tracks]
-    changed = {"doubled": 0, "hints": 0, "moved": 0, "duplicates": 0, "overlaps": 0, "stuck": 0, "stray_offs": 0}
+    changed = {"doubled": 0, "hints": 0, "moved": 0, "merged": 0, "duplicates": 0, "overlaps": 0, "stuck": 0,
+               "stray_offs": 0}
 
     # 1. tempo map events onto the first track (format 1 only), before anything shifts indexes
     misplaced = set(_misplaced(mf))
@@ -462,6 +504,17 @@ def repair(mf: MidiFile, notes: bool = True) -> tuple[MidiFile, dict]:
                 (moved if (ti, ei) in misplaced else stay).append(e)
             tracks[ti] = stay
         changed["moved"] = len(moved)
+        # Several tracks often carry identical copies (LilyPond writes the tempo on every
+        # instrument track); one copy on the first track is enough.
+        have = {(e.tick, e.raw) for e in tracks[0]}
+        unique = []
+        for e in sorted(moved, key=lambda e: e.tick):
+            if (e.tick, e.raw) not in have:
+                have.add((e.tick, e.raw))
+                unique.append(e)
+        changed["merged"] = len(moved) - len(unique)
+        changed["moved"] = len(unique)
+        moved = unique
         first = [e for e in tracks[0] if e.meta_type != END_OF_TRACK]
         eot = [e for e in tracks[0] if e.meta_type == END_OF_TRACK]
         merged = sorted(first + moved, key=lambda e: e.tick)  # stable: track 0's own events first
@@ -494,6 +547,30 @@ def repair(mf: MidiFile, notes: bool = True) -> tuple[MidiFile, dict]:
         changed.update(duplicates=c.duplicates, overlaps=c.overlaps, stuck=c.stuck, stray_offs=c.stray_offs)
 
     return MidiFile(mf.header, mf.fmt, mf.division, tracks), changed
+
+
+MIDI_EXTENSIONS = (".mid", ".midi", ".smf", ".rmi", ".kar")
+
+
+def midi_files(paths: list[str], recursive: bool = False) -> list[str]:
+    """Expand folders into the MIDI files inside them; plain files pass through.
+
+    Cleaned copies ("(tempo fixed)") are skipped so a second run does not
+    check its own output. Hidden folders and files are skipped.
+    """
+    out = []
+    for p in paths:
+        if not os.path.isdir(p):
+            out.append(p)
+            continue
+        for root, dirs, names in os.walk(p):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".")) if recursive else []
+            for name in sorted(names):
+                if name.startswith(".") or "(tempo fixed)" in name:
+                    continue
+                if name.lower().endswith(MIDI_EXTENSIONS):
+                    out.append(os.path.join(root, name))
+    return out
 
 
 def fixed_name(path: str) -> str:
@@ -577,8 +654,11 @@ def fix_file(path: str, out: str | None = None, notes: bool = True) -> tuple[str
     said = []
     if removed:
         said.append("removed " + joined(removed))
-    if changed["moved"]:
-        said.append(f"moved {n(changed['moved'], 'tempo map event')} to the first track")
+    if changed["moved"] or changed["merged"]:
+        moved = f"moved {n(changed['moved'], 'tempo map event')} to the first track"
+        if changed["merged"]:
+            moved += f", merging {n(changed['merged'], 'identical copy', 'identical copies')}"
+        said.append(moved)
     if ended:
         said.append("ended " + joined(ended))
     what = said[0] if len(said) == 1 else ", ".join(said[:-1]) + ", and " + said[-1]

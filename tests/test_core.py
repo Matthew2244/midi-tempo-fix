@@ -172,7 +172,8 @@ def test_describe_reads_as_sentences(tmp_path):
     tm = [(0, tempo(100)), (4 * PPQ, tempo(90)), (4 * PPQ, tempo(91))]
     p = write(tmp_path, "d.mid", smf([track(tm), track(notes())]))
     lines = describe(analyze(read_midi(p), "d.mid"))
-    assert lines[0].startswith("d.mid:") and lines[-1] == "Needs fixing."
+    assert lines[0] == "d.mid: needs fixing. 1 problem: two tempos on one tick."
+    assert lines[1].startswith("3 tempo events")
 
 
 # ---------------------------------------------------------------- notes and the refinements of 1.1
@@ -227,9 +228,11 @@ def test_stuck_note_ends_with_the_track_and_stray_release_goes(tmp_path):
 
 def test_zero_length_notes_are_reported_but_kept(tmp_path):
     p = note_file(tmp_path, "zero.mid", [on(0), off(0), on(PPQ, key=62), off(PPQ, key=62)])
-    r = analyze(read_midi(p))
+    r = analyze(read_midi(p), "zero.mid")
     assert r.notes.zero_length == 2 and not r.needs_fix
-    assert any(line.startswith("Left alone: 2 notes with no length") for line in describe(r))
+    lines = describe(r)
+    assert lines[0] == "zero.mid: clean."
+    assert any(line.startswith("Left alone: 2 notes with no length") for line in lines)
 
 
 def test_zero_length_note_survives_a_rebuild_in_order(tmp_path):
@@ -375,7 +378,34 @@ def test_smpte_file_is_read_and_its_notes_checked(tmp_path):
     p = write(tmp_path, "smpte.mid", b"MThd" + struct.pack(">IHH", 6, 0, 1) + div + b"MTrk" + struct.pack(">I", len(body)) + body)
     r = analyze(read_midi(p), "smpte.mid")
     assert r.smpte == 25 and r.notes.duplicates == 1
-    assert "video frames" in describe(r)[0]
+    assert describe(r)[0] == "smpte.mid: needs fixing. 1 problem: duplicate notes."
+    assert "video frames" in describe(r)[1]
     out, _ = fix_file(p)
     assert open(out, "rb").read()[12:14] == div  # the timing header is kept
     assert not analyze(read_midi(out)).needs_fix
+
+
+def test_summary_line():
+    from midi_tempo.core import summary
+    assert summary(12, 3, 1) == "Checked 12 files: 3 need fixing, 8 clean, 1 could not be read."
+    assert summary(1, 1) == "Checked 1 file: 1 needs fixing, 0 clean."
+
+
+def test_drum_overlaps_are_not_a_problem_but_drum_duplicates_are(tmp_path):
+    drums = [on(0, 42, ch=9), on(PPQ // 4, 42, ch=9), off(PPQ, 42, ch=9), off(PPQ, 42, ch=9)]
+    p = note_file(tmp_path, "drums.mid", drums)
+    r = analyze(read_midi(p))
+    assert r.notes.overlaps == 0 and not r.needs_fix
+    p2 = note_file(tmp_path, "drums2.mid", [on(0, 36, ch=9), on(0, 36, 90, ch=9), off(10, 36, ch=9), off(10, 36, ch=9)])
+    assert analyze(read_midi(p2)).notes.duplicates == 1
+
+
+def test_identical_tempo_copies_on_every_track_become_one(tmp_path):
+    copies = [(0, tempo(72)), (8 * PPQ, tempo(96)), (0, timesig(3, 2))]
+    p = write(tmp_path, "lily.mid", smf([track([(0, text("Title", 3))]), track(notes() + copies), track(copies)]))
+    assert analyze(read_midi(p)).misplaced == 6
+    out, _ = fix_file(p)
+    fixed = read_midi(out)
+    assert [e.bpm() for e in fixed.tracks[0] if e.meta_type == 0x51] == pytest.approx([72, 96], abs=1e-3)
+    assert sum(1 for e in fixed.tracks[0] if e.meta_type == 0x58) == 1
+    assert all(e.meta_type not in (0x51, 0x58) for t in fixed.tracks[1:] for e in t)

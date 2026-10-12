@@ -15,7 +15,7 @@ dependencies = []
 app = ["wxPython>=4.2"]
 
 [project.scripts]
-midi-tempo = "midi_tempo.cli:main"
+midi-tempo = "midi_tempo.cli:run"
 
 [project.gui-scripts]
 midi-tempo-fix = "midi_tempo.gui:main"

@@ -11,13 +11,13 @@ A MIDI file can't hold a smooth tempo ramp, so apps write each ramp as lots of s
 In the tempo map:
 
 - **Two different tempos on the same tick.** The MIDI rules say the second one wins, but some apps keep the first and play the wrong tempo from there on. Drum-loop libraries often start with a default 120 BPM followed by the real tempo on the same tick, which can put a loop seconds off. REAPER's export can do it at the end of a ramp; Logic drifted almost a second over one song. The same tempo written twice is harmless and left alone.
-- **Tempo changes on the wrong track.** In a multi-track file the tempo map belongs on the first track, and some apps only look there. Time signatures copied onto every track are fine and left alone.
+- **Tempo changes on the wrong track.** In a multi-track file the tempo map belongs on the first track, and some apps only look there; anything else plays at the default 120 BPM. Score apps such as LilyPond write the tempo on every instrument track instead. The fix moves it to the first track and merges the identical copies. Time signatures copied onto every track are fine and left alone.
 - **REAPER ramp notes.** REAPER hides text notes in its exports ("REAPER gradual tempo change start ...") so that its own import can rebuild each ramp. That rebuild puts the end of a ramp in the wrong place when the ramp ends on a time signature change; one song came back half a second off. Other apps ignore the notes, and without them REAPER reads the exact steps like everyone else.
 
 In the notes:
 
 - **Duplicate notes:** the same key struck twice at the same moment. Some apps play both, some play one. The fix keeps one, as long as the longer of the two.
-- **Overlapping notes:** a key struck again before it was released. Apps disagree about which release ends which note, so lengths change. The fix ends the earlier note where the key is struck again.
+- **Overlapping notes:** a key struck again before it was released. Apps disagree about which release ends which note, so lengths change. The fix ends the earlier note where the key is struck again. Drums (channel 10) are left alone here: drum hits are one-shots, so their length rarely matters, and drum performances overlap constantly.
 - **Stuck notes** that never end. Some apps cut them off, some hold them forever. The fix ends them at the end of their track.
 - **Stray note releases** with no note playing. Removed.
 - **Notes with no length** are reported but left alone, because no length is right for every case.
@@ -48,10 +48,11 @@ Get the latest version from the [Releases page](../../releases):
 
 ## Using the app
 
-1. Press **Choose MIDI files** (Command-O on Mac, Control-O on Windows) and pick one or more files. You can also drop files on the window, or on the app's Dock icon on a Mac.
-2. The report says what's in each file and whether anything needs fixing. Focus moves to the report, so your screen reader reads it right away.
+1. Press **Choose MIDI files** (Command-O on Mac, Control-O on Windows) and pick one or more files, or **Choose a folder** (Command-Shift-O or Control-Shift-O) to check every MIDI file in it, including folders inside it. You can also drop files or folders on the window, or on the app's Dock icon on a Mac.
+2. The report starts with the answer: each file is either "clean" or "needs fixing", with the problems named. The details follow. With more than one file, a summary line comes first ("Checked 40 files: 3 need fixing, 37 clean"). With more than 20, only the files that need fixing are listed, so the report stays short enough to listen to. Focus moves to the report, so your screen reader reads it right away. Big folders are checked in the background, with progress in the title bar.
 3. If something needs fixing, press **Fix and save cleaned copies** (Command-S or Control-S). The report says where each copy went, and **Show cleaned files** (Command-Shift-S or Control-Shift-S) opens that folder with them selected.
 4. **Compare with another file** (Command-R or Control-R) compares the chosen files with any other MIDI file or a REAPER project.
+5. **Copy report** (Command-Shift-C or Control-Shift-C) puts the whole report on the clipboard, ready to paste into a message. **File, Save report as text** saves it as a file. **Help, MIDI Tempo Fix Help** opens this page.
 
 **Updates:** once a day the app asks GitHub whether there's a newer version, and the report says so if there is. **Help, Check for Updates** downloads it, checks that it starts, and replaces the app you have. Nothing else is sent anywhere.
 
@@ -67,6 +68,7 @@ Then:
 
 ```
 midi-tempo check song.mid
+midi-tempo check "Exports folder" --brief -r
 midi-tempo check export.mid --compare "after another app.mid"
 midi-tempo check export.mid --compare "My Song.RPP"
 midi-tempo fix song.mid
@@ -74,7 +76,7 @@ midi-tempo fix "Exports folder"
 midi-tempo fix --tempo-only song.mid
 ```
 
-`check` changes nothing. It exits with 0 when files are clean, 1 when something needs fixing, and 2 when a file can't be read. `fix` takes files or folders and saves a cleaned copy of each file that needs one. The command line needs nothing beyond Python itself. To open the app from a pip install, add the app extra (`pip install "midi-tempo-fix[app] @ git+https://github.com/Matthew2244/midi-tempo-fix"`) and run `midi-tempo-fix`.
+`check` starts each file with its verdict, and puts a summary line first when there's more than one. `--brief` gives one line per file. `-r` also looks inside folders within folders. `check` changes nothing. It exits with 0 when files are clean, 1 when something needs fixing, and 2 when a file can't be read. `fix` takes files or folders and saves a cleaned copy of each file that needs one. The command line needs nothing beyond Python itself. To open the app from a pip install, add the app extra (`pip install "midi-tempo-fix[app] @ git+https://github.com/Matthew2244/midi-tempo-fix"`) and run `midi-tempo-fix`.
 
 Output is plain sentences, printed once per command, so a screen reader doesn't get interrupted mid-sentence.
 

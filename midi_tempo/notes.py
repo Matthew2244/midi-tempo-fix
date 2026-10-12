@@ -12,6 +12,11 @@
 * Zero-length notes: on and off on the same tick. Some apps skip them, some
   play a click. Reported only, because no length is right for every case.
 
+The General MIDI drum channel (channel 10) is exempt from the overlap check:
+drum hits are one-shots, so how long a drum note lasts rarely changes the
+sound, and drum performances overlap constantly. Duplicate drum hits still
+count; those really do sound different (louder, or a flam).
+
 Pairing rule when rebuilding: a note-off ends the earliest sounding note of
 that key and channel (first in, first out), the most common behaviour.
 Note starts, keys, channels and velocities are never changed.
@@ -36,6 +41,9 @@ class NoteCounts:
         return self.duplicates + self.overlaps + self.stuck + self.stray_offs
 
 
+DRUMS = 9  # channel 10, counted from zero
+
+
 def _is_on(e) -> bool:
     return (e.raw[0] & 0xF0) == 0x90 and e.raw[2] > 0
 
@@ -57,7 +65,7 @@ def analyze_notes(tracks) -> NoteCounts:
                 key = (e.raw[0] & 0x0F, e.raw[1])
                 if (key[0], key[1], e.tick) in starts:
                     c.duplicates += 1
-                elif sounding.get(key):
+                elif sounding.get(key) and key[0] != DRUMS:
                     c.overlaps += 1
                 starts.add((key[0], key[1], e.tick))
                 sounding.setdefault(key, []).append(e.tick)
@@ -122,9 +130,10 @@ def _rebuild(events):
                     merged[-1][1], merged[-1][3] = n[1], n[3]
                 continue
             merged.append(n)
-        for a, b in zip(merged, merged[1:]):  # overlap: end where the next strike begins
-            if a[1] > b[0]:
-                a[1] = b[0]
+        if group and (group[0][2][0] & 0x0F) != DRUMS:
+            for a, b in zip(merged, merged[1:]):  # overlap: end where the next strike begins
+                if a[1] > b[0]:
+                    a[1] = b[0]
         kept += merged
     # At one tick: note-offs, then other events in their original order, then note-ons.
     rows = []

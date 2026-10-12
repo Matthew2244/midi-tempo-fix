@@ -18,13 +18,25 @@ All found on 2026-10-11 from real REAPER 7.82 exports, measured rather than assu
 
 Doubled tempo events only count when the values differ by more than 0.001 BPM. The same tempo written twice can't make apps disagree and is left alone. (1.0 flagged those too; 36 of the first 40 hits in the scan were this harmless kind.)
 
+## Reports are verdict first
+
+Every file's report starts with one line a listener can stop after: "name: clean." or "name: needs fixing. 2 problems: two tempos on one tick, REAPER ramp notes." (`verdict()`), then the details. More than one file adds `summary()` on top ("Checked 40 files: 3 need fixing, 37 clean."). In the app, more than `BRIEF_OVER` (20) files lists only the verdicts of files needing fixing; the command's `--brief` does the same per file. Inside a chosen folder, names include the subfolder, since names repeat across folders.
+
+## Batches in the app
+
+Checking and fixing run on a worker thread; every control is disabled meanwhile (`_set_busy`). Progress goes to the window title once a second, and roughly every 500 files `announce()` asks VoiceOver to say "Checked 1000 of 5343" (macOS AXAnnouncementRequested through the Objective-C runtime, like the report label; no extra dependency). Short confirmations (Report copied, Report saved) go to the status bar and `announce()`, so focus never moves. Files that can't be written next to their original are collected and handled after the worker, on the main thread, where the folder dialog can be shown. `reveal()` opens only the first copy when copies span more than three folders, so a big batch doesn't open dozens of Finder windows.
+
+`Event` uses `__slots__` and computes `meta_type` once; as a property it was a third of the time on a big piano file. The 5,343-file library went from 48 to 36 seconds.
+
 ## SMPTE-timed files
 
 A file whose header counts time in video frames (division's top bit set) has no tempo map; tempo events in it do not apply. It is modelled as a fixed 60 BPM with frames × ticks-per-frame ticks per beat, so one beat is one second and every time calculation stays the same code. Tempo checks are skipped, notes are checked and fixed, and the original header is written back unchanged. 29 means 29.97 (drop frame).
 
 ## Note problems (`notes.py`)
 
-Duplicates, same-key overlaps, stuck notes and stray releases are fixed; zero-length notes are reported only. Rebuilding pairs note-offs first in, first out, merges same-start duplicates (first velocity, longest end), ends an overlapped note at the re-strike, and ends stuck notes at the track's last tick. At one tick it writes note-offs, then other events in their original order, then note-ons; a zero-length note keeps on-then-off. Only tracks with a fixable problem are rebuilt.
+Duplicates, same-key overlaps, stuck notes and stray releases are fixed; zero-length notes are reported only. Overlaps on the drum channel (channel 10, index 9) are not counted or trimmed: drum hits are one-shots and drum performances overlap constantly. Before this rule, 881 of the 5,343 library files "needed fixing", mostly Groove drum performances; after it, 314.
+
+Tempo map events moved to the first track are de-duplicated against each other and against what track 0 already holds. LilyPond (all of Mutopia) writes the tempo on every instrument track, and moving them all used to stack identical copies; the report says "moved 2 ..., merging 4 identical copies". Rebuilding pairs note-offs first in, first out, merges same-start duplicates (first velocity, longest end), ends an overlapped note at the re-strike, and ends stuck notes at the track's last tick. At one tick it writes note-offs, then other events in their original order, then note-ons; a zero-length note keeps on-then-off. Only tracks with a fixable problem are rebuilt.
 
 Verification for note fixes: every note start (track, moment, channel, key, first velocity) is identical before and after, every non-note event is at the same moment, and the copy has nothing left to fix.
 
