@@ -741,8 +741,12 @@ class MainFrame(wx.Frame):
         started = time.time()
         self._set_busy(True)
         if is_audio:  # a few seconds a file: say so, so the wait is not silence
-            self.tell(f"Listening to {os.path.basename(other)} and lining up "
-                      f"{'the MIDI file' if len(files) == 1 else f'{len(files)} MIDI files'}. Escape stops.")
+            text = (f"Listening to {os.path.basename(other)} and lining up "
+                    f"{'the MIDI file' if len(files) == 1 else f'{len(files)} MIDI files'}. Escape stops.")
+            self.SetStatusText(text)
+            # VoiceOver drops an announcement made while the file dialog is still handing focus back;
+            # 1.2 seconds later it is spoken (the Copyist finding). A check that finished first says nothing.
+            wx.CallLater(1200, lambda: self.busy and announce(text))
 
         def work():
             done = []

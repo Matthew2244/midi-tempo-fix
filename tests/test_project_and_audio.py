@@ -48,7 +48,7 @@ def test_padded_export_is_explained_and_fixed_with_the_project(tmp_path):
     rpp = write(tmp_path, "song.RPP", RPP.encode())
     mid = write(tmp_path, "song.mid", reaper_style_export(2))
     lines = compare_project(read_midi(mid), rpp)
-    assert "REAPER's export" in lines[0] and "1000 ms late" in lines[1]
+    assert "REAPER's export" in lines[0] and "1.0 seconds late" in lines[1]
     assert needs_project_fix(mid, rpp)
     out, said = fix_file(mid, project=rpp)
     assert out and "checked by reading the copy back" in " ".join(said)

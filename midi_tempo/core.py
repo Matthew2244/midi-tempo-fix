@@ -716,10 +716,13 @@ def short_bar_sentences(mf: MidiFile, rpp: str, bars: list[ShortBar]) -> list[st
     for b in bars:
         tick = int(round((b.beat + b.shift) * mf.division))
         late = (seconds_at(tempos, mf.division, tick) - f(b.beat)) * 1000
+        short = (f"{round(b.missing, 2):g} beat" + ("" if round(b.missing, 2) == 1 else "s")) if b.missing >= 1 \
+            else f"{b.missing:.2f} of a beat"
+        late_words = f"{late / 1000:.1f} seconds" if abs(late) >= 1000 else f"{late:.0f} ms"
         out.append(
             f"  {bar_beat(tick, mf.division, sigs)} ({_clock(b.seconds)}): the project's time signature starts "
-            f"partway through a bar, leaving that bar {b.missing:.2f} of a beat short. REAPER's export made the "
-            f"bar whole, so everything after it plays {late:.0f} ms late."
+            f"partway through a bar, leaving that bar {short} short. REAPER's export made the bar whole, so "
+            f"everything after it plays {late_words} late."
         )
     return out
 
