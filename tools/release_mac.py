@@ -89,9 +89,13 @@ def main():
     if os.path.exists(out):
         os.remove(out)
     run(["ditto", "-c", "-k", "--keepParent", app, out])
-    test = subprocess.run([os.path.join(app, "Contents", "MacOS", NAME), "--self-test"], capture_output=True, text=True)
-    print(test.stdout.strip())
-    if test.returncode != 0:
+    with tempfile.TemporaryFile("w+") as log:  # a file, not a pipe (see build_app.py)
+        test = subprocess.run([os.path.join(app, "Contents", "MacOS", NAME), "--self-test"],
+                              stdout=log, stderr=subprocess.STDOUT, timeout=120)
+        log.seek(0)
+        text = log.read()
+    print(text.strip().splitlines()[-1] if text.strip() else "(no self-test output)")
+    if test.returncode != 0 or "OK" not in text:
         sys.exit("The signed app did not pass its self-test.")
     if not a.no_upload:
         run(["gh", "release", "upload", a.tag, out, "--clobber"])

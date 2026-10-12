@@ -129,8 +129,13 @@ def install(info: dict, relaunch: bool = True) -> str:
                 z.extractall(new_dir)
             new_app = os.path.join(new_dir, APP_NAME)
             exe = os.path.join(new_app, f"{APP_NAME}.exe")
-        test = subprocess.run([exe, "--self-test"], capture_output=True, text=True, timeout=60)
-        if test.returncode != 0 or "OK" not in test.stdout:
+        log = os.path.join(work, "self-test.txt")
+        with open(log, "w") as out:  # a file, not a pipe: a broken build's helper could hold a pipe open forever
+            try:
+                test = subprocess.run([exe, "--self-test"], stdout=out, stderr=subprocess.STDOUT, timeout=90)
+            except subprocess.TimeoutExpired:
+                raise UpdateError("the downloaded version did not finish its self-test, so nothing was changed")
+        if test.returncode != 0 or "OK" not in open(log).read():
             raise UpdateError("the downloaded version did not start in its self-test, so nothing was changed")
     except UpdateError:
         shutil.rmtree(work, ignore_errors=True)

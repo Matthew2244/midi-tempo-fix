@@ -451,3 +451,30 @@ def test_several_tempos_at_one_moment_are_not_a_ramp(tmp_path):
 def test_whole_tempos_read_as_whole_numbers():
     from midi_tempo.core import bpm_text
     assert bpm_text(60e6 / round(60e6 / 90)) == "90" and bpm_text(118.749097) == "118.75"
+
+
+# ---------------------------------------------------------------- 1.6: many cores
+
+def test_parallel_results_match_serial_and_keep_order(tmp_path):
+    from midi_tempo.batch import check_many, fix_many
+    paths = []
+    for i in range(20):
+        tm = [(0, tempo(100 + i))] + ([(PPQ, tempo(90)), (PPQ, tempo(91))] if i % 3 == 0 else [])
+        paths.append(write(tmp_path, f"p{i:02}.mid", smf([track(tm), track(notes())])))
+    paths.append(write(tmp_path, "bad.mid", b"nope"))
+    jobs = [(p, os.path.basename(p)) for p in paths]
+    serial, _ = check_many(jobs, workers=1)
+    par, stopped = check_many(jobs, workers=3)
+    assert not stopped and [r[0] for r in par] == paths
+    assert [(r[1].doubled_cost_ms if r[1] else r[2]) for r in par] == [(r[1].doubled_cost_ms if r[1] else r[2]) for r in serial]
+    fixed, _ = fix_many([(p, True) for p in paths if not p.endswith("bad.mid")], workers=3)
+    assert sum(1 for _, out, _, _ in fixed if out) == 7  # i = 0, 3, 6, ..., 18
+
+
+def test_stop_ends_a_batch_early(tmp_path):
+    from midi_tempo.batch import check_many
+    paths = [write(tmp_path, f"s{i}.mid", smf([track([(0, tempo(100))]), track(notes())])) for i in range(30)]
+    seen = []
+    res, stopped = check_many([(p, p) for p in paths], workers=1, progress=lambda i, t: seen.append(i),
+                              stop=lambda: len(seen) >= 5)
+    assert stopped and len(res) == 5

@@ -46,5 +46,18 @@ else:
     shutil.make_archive(out, "zip", ".", NAME)
     out += ".zip"
     exe = os.path.join(NAME, NAME + ".exe")
-print("Self-test:", subprocess.run([exe, "--self-test"], capture_output=True, text=True).stdout.strip())
+# Read the self-test through a file, with a time limit: a broken build can leave a helper process
+# holding an output pipe open, and reading a pipe would then wait forever.
+import tempfile
+with tempfile.TemporaryFile("w+") as out:
+    try:
+        subprocess.run([exe, "--self-test"], stdout=out, stderr=subprocess.STDOUT, timeout=120)
+    except subprocess.TimeoutExpired:
+        print("Self-test: TIMED OUT")
+        sys.exit(1)
+    out.seek(0)
+    result = out.read().strip().splitlines()[-1:] or ["(no output)"]
+print("Self-test:", result[0])
+if "OK" not in result[0]:
+    sys.exit("The built app failed its self-test.")
 print("Built", os.path.abspath(out))

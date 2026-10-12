@@ -31,6 +31,18 @@ Every file's report starts with one line a listener can stop after: "name: clean
 - **Bold marks only section headings**: the first line of the report and the first line after a blank line (a file's verdict, the summary). Bolding every verdict line in a 300-file batch made everything bold and nothing stand out.
 - After a batch over 5 seconds: `RequestUserAttention()` (Dock bounce) and a system sound (Glass on Mac, MessageBeep on Windows).
 
+## Using every core (`batch.py`)
+
+`check_many` / `fix_many` run the per-file work in a `ProcessPoolExecutor` (spawn context on every platform: consistent, and safe next to the GUI's threads), all cores but one, `chunksize` scaled to the batch, results in the original order, progress as files finish, and a stop callback that cancels the rest. Below `PARALLEL_FROM` (8) files it stays on one core, since starting workers costs more. The 5,343-file library: 36 s to 3.4 s on the command line (20-core Studio), 4.2 s in the app; parallel and serial output are identical, and fixing all of Mutopia in parallel produces byte-identical files to fixing it serially.
+
+Hard-won rules, all found by deliberately breaking it:
+- **Every entry point needs `if __name__ == "__main__"`**, because spawn re-imports the main script in each worker. The `midi-tempo` launcher and `__main__.py` lacked it, and every worker re-ran the whole command.
+- **The frozen app needs `multiprocessing.freeze_support()` first in `app.py`.** Without it, each worker is a whole new copy of the app, windows and all, and the batch hangs. Two nets catch a build that loses it: `gui.main()` exits at once when started with `--multiprocessing-fork` (so the pool breaks and the batch falls back to one core instead of piling up windows), and `--self-test` runs a real two-worker batch, waits at most 30 s, and checks `batch.last_run["parallel"]`, so a quiet fallback still fails the test.
+- **Read a self-test through a file, never a pipe.** A broken build leaves Python's resource tracker alive, holding the pipe open, so `capture_output=True` waited forever. `build_app.py`, `release_mac.py` and the updater all use a temp file and a timeout.
+- If the pool can't start or dies (`BrokenProcessPool`, `OSError`), the batch finishes on one core; the GUI catches anything else and ends the batch with a message rather than staying busy.
+
+The app shows a Stop button and a progress bar (`wx.Gauge`) only while working; Escape also stops. A new batch clears the Files list and the status bar first, so no stale rows or messages sit beside a new run.
+
 ## Batches in the app
 
 Checking and fixing run on a worker thread; every control is disabled meanwhile (`_set_busy`). Progress goes to the window title once a second, and roughly every 500 files `announce()` asks VoiceOver to say "Checked 1000 of 5343" (macOS AXAnnouncementRequested through the Objective-C runtime, like the report label; no extra dependency). Short confirmations (Report copied, Report saved) go to the status bar and `announce()`, so focus never moves. Files that can't be written next to their original are collected and handled after the worker, on the main thread, where the folder dialog can be shown. `reveal()` opens only the first copy when copies span more than three folders, so a big batch doesn't open dozens of Finder windows.

@@ -19,6 +19,7 @@ import threading
 import time
 
 from . import __version__, update
+from .batch import check_many, fix_many
 import webbrowser
 
 from .core import (MidiError, analyze, compare_with, describe, fix_file, midi_files, problems, read_midi,
@@ -191,10 +192,20 @@ class MainFrame(wx.Frame):
         self.compare.Disable()
         self.show_saved.Disable()
 
+        self.stop_btn = wx.Button(panel, label="S&top")
+        self.stop_btn.SetToolTip("Stops checking or fixing. Escape does the same.")
+        self.stop_btn.Disable()
+        self.gauge = wx.Gauge(panel, range=100, name="Progress")
+        self.gauge.SetToolTip("How far through the files it is.")
+        self.gauge.Hide()
+        self.stopping = False
+
         buttons = wx.BoxSizer(wx.HORIZONTAL)
         buttons.Add(self.fix, 0, wx.RIGHT, 8)
         buttons.Add(self.show_saved, 0, wx.RIGHT, 8)
-        buttons.Add(self.compare, 0)
+        buttons.Add(self.compare, 0, wx.RIGHT, 8)
+        buttons.Add(self.stop_btn, 0, wx.RIGHT, 8)
+        buttons.Add(self.gauge, 1, wx.ALIGN_CENTER_VERTICAL)
 
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(intro, 0, wx.ALL, 12)
@@ -207,7 +218,7 @@ class MainFrame(wx.Frame):
         s.Add(self.list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, 12)
         s.Add(report_label, 0, wx.LEFT | wx.RIGHT, 12)
         s.Add(self.report, 2, wx.EXPAND | wx.ALL, 12)
-        s.Add(buttons, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        s.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         panel.SetSizer(s)
         self.CreateStatusBar()
         self.busy = False
@@ -215,6 +226,8 @@ class MainFrame(wx.Frame):
         self._menus()
         self.choose_dir.Bind(wx.EVT_BUTTON, self.on_choose_dir)
         self.list.Bind(wx.EVT_LISTBOX, self.on_select_file)
+        self.stop_btn.Bind(wx.EVT_BUTTON, self.on_stop)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self._texts = [intro, files_label, report_label]
         self.text_pt = self.cfg.ReadInt("text_size", 0) or self.report.GetFont().GetPointSize()
         self.default_pt = self.report.GetFont().GetPointSize()
@@ -442,30 +455,28 @@ class MainFrame(wx.Frame):
             return os.path.basename(p)
 
         self._set_busy(True)
+        self.entries = []  # last run's rows would describe files that are no longer what's shown
+        self.list.Clear()
         if len(files) > BRIEF_OVER:
-            self.show([f"Checking {len(files)} MIDI files. Large folders take a while; progress is in the title bar."])
+            self.show([f"Checking {len(files)} MIDI files. Progress shows in the bar at the bottom and the "
+                       f"title bar. Escape stops."])
 
         started = time.time()
 
         def work():
-            results, last = [], time.time()
-            for i, p in enumerate(files, 1):
-                name = label(p)
-                try:
-                    r = analyze(read_midi(p), name)
-                    results.append((p, r, None))
-                except (MidiError, OSError) as e:
-                    results.append((p, None, f"{name}: could not check it, {e}."))
-                if time.time() - last > 1:
-                    last = time.time()
-                    wx.CallAfter(self.SetTitle, f"{APP_NAME}: checking {i} of {len(files)}")
-                    if i % 500 < 50:
-                        wx.CallAfter(announce, f"Checked {i} of {len(files)}")
-            wx.CallAfter(self._checked, files, results, missing, notes, focus_report, started)
+            progress = self._progress_reporter("checking", "Checked")
+            try:
+                results, stopped = check_many([(p, label(p)) for p in files], progress=progress,
+                                              stop=lambda: self.stopping)
+            except Exception as e:  # never leave the window stuck busy
+                wx.CallAfter(self._failed, f"Checking stopped because of an unexpected error: {e}")
+                return
+            done = files[:len(results)]
+            wx.CallAfter(self._checked, done, results, missing, notes, focus_report, started, stopped, len(files))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _checked(self, files, results, missing, notes, focus_report, started=None):
+    def _checked(self, files, results, missing, notes, focus_report, started=None, stopped=False, asked=0):
         self._set_busy(False)
         self.SetTitle(APP_NAME + (" (update available)" if self.update_info else ""))
         self.files = files
@@ -473,6 +484,8 @@ class MainFrame(wx.Frame):
         unreadable = sum(1 for _, r, _ in results if r is None)
         brief = len(files) > BRIEF_OVER
         lines = [f"{os.path.basename(p)}: not found." for p in missing]
+        if stopped:
+            lines += [f"Stopped after {len(files)} of {asked} files. These are the results so far.", ""]
         if len(files) > 1:
             lines += [summary(len(files), len(self.fixable), unreadable), ""]
         for p, r, err in results:
@@ -509,14 +522,63 @@ class MainFrame(wx.Frame):
             self.report.SetValue("\n".join(lines).rstrip())
 
     def _set_busy(self, busy: bool):
-        """While checking or fixing, every control is off; afterwards the caller decides what comes back."""
+        """While checking or fixing, every control but Stop is off; afterwards the caller decides
+        what comes back. The progress bar shows only while there is progress to show."""
         self.busy = busy
+        self.stopping = False
         if busy:
+            self.SetStatusText("")
             for c in (self.choose, self.choose_dir, self.notes, self.fix, self.compare, self.show_saved):
                 c.Disable()
+            self.stop_btn.Enable()
+            self.gauge.SetValue(0)
+            self.gauge.Show()
         else:
             for c in (self.choose, self.choose_dir, self.notes):
                 c.Enable()
+            self.stop_btn.Disable()
+            self.gauge.Hide()
+        self.panel.Layout()
+
+    def _progress_reporter(self, verb: str, past: str):
+        """Called from the worker as files finish: updates the bar and title a few times a second,
+        and has VoiceOver say the count every few seconds on a long batch."""
+        state = {"last": 0.0, "spoken": time.time()}
+
+        def progress(i, total):
+            now = time.time()
+            if now - state["last"] < 0.25 and i < total:
+                return
+            state["last"] = now
+            wx.CallAfter(self._show_progress, verb, i, total)
+            if now - state["spoken"] > 5 and i < total:
+                state["spoken"] = now
+                wx.CallAfter(announce, f"{past} {i} of {total}")
+
+        return progress
+
+    def _show_progress(self, verb, i, total):
+        if not self.busy:
+            return
+        self.gauge.SetValue(int(100 * i / max(1, total)))
+        self.SetTitle(f"{APP_NAME}: {verb} {i} of {total}")
+
+    def _failed(self, message: str):
+        self._set_busy(False)
+        self.SetTitle(APP_NAME)
+        self.show([message, "Nothing was changed by the part that failed. Your original files are untouched."])
+
+    def on_stop(self, _=None):
+        if self.busy and not self.stopping:
+            self.stopping = True
+            self.stop_btn.Disable()
+            self.tell("Stopping.")
+
+    def _on_key(self, event):
+        if event.GetKeyCode() == wx.WXK_ESCAPE and self.busy:
+            self.on_stop()
+            return
+        event.Skip()
 
     def on_notes_toggled(self, _):
         self.cfg.WriteBool("check_notes", self.notes.GetValue())
@@ -579,26 +641,21 @@ class MainFrame(wx.Frame):
         started = time.time()
         self._set_busy(True)
         if len(todo) > BRIEF_OVER:
-            self.show([f"Fixing {len(todo)} files. Progress is in the title bar."])
+            self.show([f"Fixing {len(todo)} files. Progress shows in the bar at the bottom and the title bar. "
+                       f"Escape stops."])
 
         def work():
-            done, last = [], time.time()
-            for i, p in enumerate(todo, 1):
-                try:
-                    out, said = fix_file(p, notes=notes)
-                    done.append((p, out, said, None))
-                except PermissionError as e:
-                    done.append((p, None, None, e))
-                except (MidiError, OSError) as e:
-                    done.append((p, None, [f"{os.path.basename(p)}: not fixed, {e}."], None))
-                if time.time() - last > 1:
-                    last = time.time()
-                    wx.CallAfter(self.SetTitle, f"{APP_NAME}: fixing {i} of {len(todo)}")
-            wx.CallAfter(self._fixed, done, notes, started)
+            progress = self._progress_reporter("fixing", "Fixed")
+            try:
+                done, stopped = fix_many([(p, notes) for p in todo], progress=progress, stop=lambda: self.stopping)
+            except Exception as e:  # never leave the window stuck busy
+                wx.CallAfter(self._failed, f"Fixing stopped because of an unexpected error: {e}")
+                return
+            wx.CallAfter(self._fixed, done, notes, started, stopped, len(todo))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _fixed(self, done, notes, started=None):
+    def _fixed(self, done, notes, started=None, stopped=False, asked=0):
         self._set_busy(False)
         self.SetTitle(APP_NAME + (" (update available)" if self.update_info else ""))
         brief = len(done) > BRIEF_OVER
@@ -623,9 +680,13 @@ class MainFrame(wx.Frame):
             head = f"Fixed {len(self.saved)} of {len(done)} files. Each cleaned copy is saved next to its original."
             lines = [head] + (["", f"{failed} could not be fixed:"] + lines if failed else [])
             lines.append("")
-        self.fixable = []
-        self.fix.Disable()
+        handled = {d[0] for d in done}
+        self.fixable = [p for p in self.fixable if p not in handled]  # after a Stop, the rest stay fixable
+        self.fix.Enable(bool(self.fixable))
         self.show_saved.Enable(bool(self.saved))
+        if stopped:
+            lines.insert(0, f"Stopped after {len(done)} of {asked} files. The rest were not fixed; "
+                            f"press Fix and save cleaned copies again to do them.")
         lines.append("Done. Your original files are unchanged. Show cleaned files opens their folder.")
         self.entries = [(e[0], e[1], e[2], copy_of[e[0]]) if e[0] in copy_of else e for e in self.entries]
         self._fill_list(keep_selection=True)
@@ -757,6 +818,11 @@ class App(wx.App):
 
 
 def main():
+    if any(a.startswith("--multiprocessing-fork") for a in sys.argv) or "-c" in sys.argv[1:2]:
+        # Started as a worker process without freeze_support having caught it: never open a
+        # window. Exiting makes the batch fall back to one core instead of piling up copies of
+        # the app (which is what happened when freeze_support was deliberately removed).
+        sys.exit(1)
     if "--update-now" in sys.argv:  # used to test the update path end to end without the window
         info = update.latest()
         if not update.newer(info):
@@ -771,7 +837,25 @@ def main():
     if "--self-test" in sys.argv:  # used by the build checks: load everything, show nothing
         app = wx.App(False)
         MainFrame().Destroy()
-        print(f"{APP_NAME} {__version__} OK, wxPython {wx.version()}")
+        # Prove worker processes start inside the packaged app (needs freeze_support in app.py).
+        import tempfile
+        from .batch import check_many, last_run
+        with tempfile.TemporaryDirectory() as d:
+            jobs = []
+            for i in range(12):
+                path = os.path.join(d, f"t{i}.mid")
+                with open(path, "wb") as f:
+                    f.write(b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x01\xe0MTrk\x00\x00\x00\x04\x00\xff\x2f\x00")
+                jobs.append((path, f"t{i}.mid"))
+            box = {}
+            t = threading.Thread(target=lambda: box.update(res=check_many(jobs, workers=2)[0]), daemon=True)
+            t.start()
+            t.join(30)  # a broken setup must fail the test, not hang it
+            res = box.get("res", [])
+        ok = len(res) == 12 and all(r[1] is not None for r in res) and last_run["parallel"]
+        print(f"{APP_NAME} {__version__} {'OK' if ok else 'PARALLEL FAILED'}, wxPython {wx.version()}")
+        if not ok:
+            sys.exit(1)
         return
     App(False).MainLoop()
 

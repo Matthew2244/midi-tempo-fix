@@ -4,6 +4,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from midi_tempo.cli import run  # noqa: E402
 
-sys.exit(run())
+if __name__ == "__main__":  # worker processes re-import this file; only the real run does the work
+    from midi_tempo.cli import run
+
+    sys.exit(run())
