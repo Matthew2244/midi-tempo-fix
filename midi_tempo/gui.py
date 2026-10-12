@@ -300,8 +300,13 @@ class MainFrame(wx.Frame):
         answer stands out by weight as well as by words; no meaning is carried by colour."""
         text = "\n".join(lines).rstrip()
         self.report.SetValue(text)
-        bold = wx.Font(self.report.GetFont())
-        bold.SetPointSize(self.text_pt)
+        # Reset to plain first: on macOS, replaced text inherits the style of what was there,
+        # so a bold first line from the previous report turned the whole new report bold.
+        plain = wx.Font(self.report.GetFont())
+        plain.SetPointSize(self.text_pt)
+        plain.SetWeight(wx.FONTWEIGHT_NORMAL)
+        self.report.SetStyle(0, len(text), wx.TextAttr(wx.NullColour, wx.NullColour, plain))
+        bold = wx.Font(plain)
         bold.SetWeight(wx.FONTWEIGHT_BOLD)
         pos, prev = 0, ""
         for line in text.split("\n"):

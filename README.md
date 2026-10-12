@@ -2,6 +2,8 @@
 
 You save a MIDI file in one app, open it in another, and the notes drift away from the click after a tempo change. Or a note that held in one app gets cut short in the next. MIDI Tempo Fix finds out why and fixes it. It works on the file itself, so it helps wherever the file goes next: Logic, Pro Tools, REAPER, Cubase, Ableton Live, Studio One, MuseScore, Sibelius, a hardware sequencer, anything that reads MIDI files.
 
+![MIDI Tempo Fix on a Mac after checking a folder of 20 MIDI files. The Files list shows three rows starting "Needs fixing", each saying "tempo on the wrong track", followed by rows starting "Clean". Below it, the report opens with "Checked 20 files: 3 need fixing, 17 clean" in bold, then each file's verdict in bold with its details underneath. Buttons along the bottom: Fix and save cleaned copies, Show cleaned files, Compare with another file.](docs/screenshot.png)
+
 It runs on Mac and Windows, as an app or from the command line. Everything works with VoiceOver, NVDA, JAWS and Narrator, and just as well with a mouse.
 
 ## What goes wrong
