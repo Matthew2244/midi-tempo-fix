@@ -19,6 +19,7 @@ import threading
 import wx
 
 from . import ableton as A
+from .gui import drop_mac_mnemonics, keys
 from .core import MidiError
 
 
@@ -47,8 +48,8 @@ class TextDialog(wx.Dialog):
         self.text.SetHint("17 Verse\n33.3 Pickup\n49 Chorus +LOOP\n97 End")
         from .gui import mac_accessibility_label
         mac_accessibility_label(self.text, "Markers")
+        cancel = wx.Button(p, wx.ID_CANCEL, "Cancel")  # made first: Tab goes in the order they're shown
         ok = wx.Button(p, wx.ID_OK, "Use These Markers")
-        cancel = wx.Button(p, wx.ID_CANCEL, "Cancel")
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(intro, 0, wx.ALL, 12)
         s.Add(label, 0, wx.LEFT | wx.RIGHT, 12)
@@ -60,6 +61,7 @@ class TextDialog(wx.Dialog):
         p.SetSizer(s)
         s.Fit(self)
         self.fonts = [intro, label, self.text]
+        drop_mac_mnemonics(self)
         self.text.SetFocus()
         self.text.SetInsertionPointEnd()
         ok.Bind(wx.EVT_BUTTON, self._ok)
@@ -108,10 +110,9 @@ class AbletonDialog(wx.Dialog):
             s.Add(ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 6 if label else gap)
             return ctrl
 
-        intro = wx.StaticText(p, label="Makes an Ableton Live set with a locator at every marker, named the way "
-                                       "AbleSet reads them, and the song's tempo and time signatures so Live's bars "
-                                       "match. Markers come from the MIDI file, typed in, or both. Nothing is saved "
-                                       "until Make Set, and your files are never changed.")
+        # One sentence: VoiceOver reads every label in this window again each time a file dialog closes
+        intro = wx.StaticText(p, label="Turns markers into Live locators AbleSet reads, with the song's tempo. "
+                                       "Nothing is saved until Make Set, and your files are never changed.")
         intro.Wrap(520)
         s.Add(intro, 0, wx.ALL, 12)
 
@@ -208,9 +209,9 @@ class AbletonDialog(wx.Dialog):
         mac_accessibility_label(self.preview, "What the set will hold")
         p.SetSizer(s)
 
+        cancel = wx.Button(self, wx.ID_CANCEL, "Cancel")  # made first: Tab goes in the order they're shown
         self.make = wx.Button(self, wx.ID_OK, "&Make Set")
         self.make.SetDefault()
-        cancel = wx.Button(self, wx.ID_CANCEL, "Cancel")
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(p, 1, wx.EXPAND)
         b = wx.BoxSizer(wx.HORIZONTAL)
@@ -221,6 +222,7 @@ class AbletonDialog(wx.Dialog):
         for c in p.GetChildren():  # the scroll bar is for the mouse; Tab should go control to control
             if isinstance(c, wx.ScrollBar):
                 c.DisableFocusFromKeyboard()
+        drop_mac_mnemonics(self)
         self.SetSize((620, 780))
         self._fonts([c for c in p.GetChildren() if isinstance(c, (wx.StaticText, wx.TextCtrl, wx.ListBox,
                                                                     wx.CheckBox))])
@@ -459,8 +461,8 @@ class AbletonDialog(wx.Dialog):
             self.songs_choice.Disable()
         self._load_midi(path)
         self.main.SetStatusText(f"{self.list.GetCount()} markers from {os.path.basename(path)}.")
-        self._land(self.list)
-        wx.CallLater(1400, lambda: self._say(f"{self.list.GetCount()} markers from {os.path.basename(path)}."))
+        self._land(self.list, after_file_dialog=True)
+        wx.CallLater(3000, lambda: self._say(f"{self.list.GetCount()} markers from {os.path.basename(path)}."))
 
     def on_no_midi(self, _):
         self._load_midi(None)
@@ -499,7 +501,7 @@ class AbletonDialog(wx.Dialog):
         else:
             e.Skip()
 
-    def _land(self, ctrl):
+    def _land(self, ctrl, after_file_dialog: bool = False):
         """Focus a control after a small window closes, so VoiceOver reads it, not the whole window.
 
         macOS puts focus back on its own as a window closes and VoiceOver then reads the
@@ -512,14 +514,16 @@ class AbletonDialog(wx.Dialog):
                 wx.CallLater(150, ctrl.SetFocus)
             else:
                 ctrl.SetFocus()
-        wx.CallLater(900, go)
+        # After the system's file dialog VoiceOver re-reads this window about 1.3 s later; landing after
+        # that starts means the control is what's heard last. After our own small windows, 0.9 s is enough.
+        wx.CallLater(2200 if after_file_dialog else 900, go)
 
     def _selected(self) -> int:
         return self.list.GetSelection()
 
     def _stop_editing(self):
         self.editing = None
-        self.add_btn.SetLabel("&Add Marker")
+        self.add_btn.SetLabel(keys("&Add Marker"))
 
     def _typed_marker(self) -> A.TypedMarker | None:
         try:
@@ -560,6 +564,18 @@ class AbletonDialog(wx.Dialog):
         m = self._typed_marker()
         if m is None:
             return
+        if not m.text:
+            self._say("Give the marker a name first.")
+            self.main.SetStatusText("Give the marker a name first.")
+            self.m_name.SetFocus()
+            return
+        taken = [x for x, _ in self.items if x is not self.editing and x.bar == m.bar and abs(x.beat - m.beat) < 1e-6]
+        if taken:
+            said = f"There's already a marker there: {marker_row(taken[0], 'typed')}. Change that one instead."
+            self._say(said)
+            self.main.SetStatusText(said)
+            self.m_bar.SetFocus()
+            return
         sigs = None if self._onto() and not self.path else self._song_sigs()  # onto a song: its bars, checked on Make
         if sigs:
             try:
@@ -580,7 +596,7 @@ class AbletonDialog(wx.Dialog):
         self.items.sort(key=lambda x: (x[0].bar, x[0].beat))
         k = next(i for i, x in enumerate(self.items) if x[0] is m)
         self.editing = None
-        self.add_btn.SetLabel("&Add Marker")
+        self.add_btn.SetLabel(keys("&Add Marker"))
         self._fill(k)
         said = f"{'Changed to' if changing else 'Added'} {marker_row(m, 'typed')}. {len(self.items)} markers."
         self.main.SetStatusText(said)
@@ -599,7 +615,7 @@ class AbletonDialog(wx.Dialog):
         self.m_bar.SetValue(str(m.bar))
         self.m_beat.SetValue(_beat_text(m.beat))
         self.m_name.SetValue(m.text)
-        self.add_btn.SetLabel("S&ave Change")
+        self.add_btn.SetLabel(keys("S&ave Change"))
         self.m_bar.SetFocus()
         self.m_bar.SetSelection(-1, -1)
         said = f"Changing {marker_row(*self.items[sel])}. Edit it, then press Return."
@@ -609,10 +625,12 @@ class AbletonDialog(wx.Dialog):
         typed = sum(1 for _, t in self.items if t == "typed")
         if typed and self.result is None:
             word = "marker" if typed == 1 else "markers"
-            with wx.MessageDialog(self, f"Close without making the set? The {typed} {word} you typed will be lost.",
-                                  "Make an Ableton Set", wx.YES_NO | wx.CANCEL | wx.NO_DEFAULT) as q:
-                q.SetYesNoLabels("Close", "Keep Working")
-                if q.ShowModal() != wx.ID_YES:
+            # Two buttons, the safe one titled exactly Cancel: macOS gives Escape only to that title
+            with wx.MessageDialog(self, f"Close without making the set? The {typed} {word} you typed will be "
+                                        "lost. Cancel keeps working.", "Make an Ableton Set",
+                                  wx.OK | wx.CANCEL | wx.CANCEL_DEFAULT) as q:
+                q.SetOKCancelLabels("Close Anyway", "Cancel")
+                if q.ShowModal() != wx.ID_OK:
                     self._land(self.list if self.items else self.m_bar)
                     return
         self.EndModal(wx.ID_CANCEL)
@@ -645,11 +663,16 @@ class AbletonDialog(wx.Dialog):
                     msg = str(e)
                     wx.MessageBox(msg[0].upper() + msg[1:] + ". Nothing was changed.", "Markers", wx.OK, self)
                     return
-        self.items = sorted(((m, "typed") for m in new), key=lambda x: (x[0].bar, x[0].beat))
+        # A line left as it was keeps "(from the file)"
+        was = {(m.bar, round(m.beat, 6), m.text): t for m, t in self.items}
+        self.items = sorted(((m, was.get((m.bar, round(m.beat, 6), m.text), "typed")) for m in new),
+                            key=lambda x: (x[0].bar, x[0].beat))
         self.editing = None
-        self.add_btn.SetLabel("&Add Marker")
+        self.add_btn.SetLabel(keys("&Add Marker"))
         self._fill(0)
-        said = f"{len(self.items)} markers now, {len(self.items) - before:+d}."
+        diff = len(self.items) - before
+        said = f"{len(self.items)} markers now" + (", the same number as before." if diff == 0 else
+                                                   f", {abs(diff)} {'more' if diff > 0 else 'fewer'} than before.")
         self.main.SetStatusText(said)
         self._land(self.list if self.items else self.m_bar)
         wx.CallLater(1400, lambda: self._say(said))
@@ -675,7 +698,7 @@ class AbletonDialog(wx.Dialog):
         if self.set_path:
             songs = len(self.song_locators)
             self.main.SetStatusText(f"{os.path.basename(path)}: {songs} song{'s' if songs != 1 else ''}.")
-            self._land(self.where)
+            self._land(self.where, after_file_dialog=True)
 
     def on_make(self, _):
         self.cfg.WriteBool("ableton_plain", self.style.GetSelection() == 1)
@@ -721,7 +744,11 @@ class AbletonDialog(wx.Dialog):
                                     f"{A.safe_name(first.name)}.als"))
             if which == 1:
                 default = os.path.join(os.path.dirname(os.path.abspath(self.files[0])), "Set Project", "Set.als")
-            with wx.FileDialog(self, "Save the new Live set", defaultDir=os.path.dirname(default),
+            # The dialog opens where the project folder will go (it may not exist yet; a missing folder
+            # sent the dialog somewhere else entirely), and the project folder is made around the set.
+            proj = os.path.dirname(default)
+            start = proj if os.path.isdir(proj) else os.path.dirname(proj)
+            with wx.FileDialog(self, "Save the new Live set (it goes in its own project folder)", defaultDir=start,
                                defaultFile=os.path.basename(default), wildcard="Live sets (*.als)|*.als",
                                style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as d:
                 if d.ShowModal() != wx.ID_OK:
@@ -729,6 +756,11 @@ class AbletonDialog(wx.Dialog):
                 self.out_path = d.GetPath()
                 if not self.out_path.lower().endswith(".als"):
                     self.out_path += ".als"
+            # Live keeps a set in its own project folder, and adds files beside it when it saves. Saved
+            # anywhere else (next to the MIDI file, among stems), it goes in "<name> Project" there.
+            folder, file = os.path.split(self.out_path)
+            if not folder.endswith(" Project") and not os.path.isdir(os.path.join(folder, "Ableton Project Info")):
+                self.out_path = os.path.join(folder, f"{os.path.splitext(file)[0]} Project", file)
             if os.path.exists(self.out_path):
                 wx.MessageBox(f"{os.path.basename(self.out_path)} already exists, and an existing set is never "
                               "saved over. Choose another name.", "Make an Ableton Set", wx.OK, self)

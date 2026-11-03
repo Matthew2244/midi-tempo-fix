@@ -11,6 +11,7 @@ goes to the report so a screen reader reads the result straight away.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 
@@ -93,6 +94,29 @@ def mac_accessibility_label(ctrl: wx.Window, label: str) -> None:
             send(t, "setAccessibilityLabel:", text, restype=None, argtypes=(ctypes.c_void_p,))
     except Exception:
         pass  # a missing label must never stop the app
+
+
+def keys(label: str) -> str:
+    """A label's shortcut letter (&) is for Windows only.
+
+    On a Mac, wx turns a button's & letter into Command plus that letter, which
+    takes over the system's own keys: Command-A in a text field pressed Add
+    Marker instead of selecting the text (heard 2026-11-03; Wavelength found the
+    same with Command-D). Windows keeps them as Alt shortcuts.
+    """
+    if sys.platform == "win32":
+        return label
+    return re.sub(r"&(?!&)", "", label).replace("&&", "&")
+
+
+def drop_mac_mnemonics(win: wx.Window) -> None:
+    """Take the & shortcut letters off every button, checkbox and label in a window (Mac only)."""
+    if sys.platform == "win32":
+        return
+    for c in win.GetChildren():
+        if isinstance(c, (wx.Button, wx.CheckBox, wx.StaticText)) and "&" in c.GetLabel():
+            c.SetLabel(keys(c.GetLabel()))
+        drop_mac_mnemonics(c)
 
 
 def announce(text: str) -> None:
@@ -273,6 +297,7 @@ class MainFrame(wx.Frame):
         wx.CallLater(1500, self.quiet_update_check)
         self.SetDropTarget(FileDrop(self))
         self.report.SetDropTarget(FileDrop(self))
+        drop_mac_mnemonics(self)
         self.choose.SetFocus()
 
     def _menus(self):

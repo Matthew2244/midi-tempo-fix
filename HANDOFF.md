@@ -134,6 +134,16 @@ Markers become Live locators named the way AbleSet reads them (`> Verse`, the so
 - View, Bigger Text reaches this window (labels, fields, list, preview; buttons and popups keep the system size, as in the main window). The intro is wrapped after the window has its size.
 - No Live where `live_templates()` looks: the window asks for a set to start from once and remembers it (`ableton_template` in wx.Config).
 - Verified by ear: labels, Tab order both ways, adding markers. Change, Remove, Edit as Text, the preview and Make were driven from code (add, change, remove, refuse an impossible beat, save a new set, pick the matching song in an existing set), not yet heard.
+- Heard with VoiceOver on the installed app and from source, 2026-11-03 (second pass): Change, Remove, Edit as Text, Make Set through the save dialog, choosing a set you have, the preview, Make into it, and the close question. What that pass changed:
+  - **Shortcut letters (&) are Windows-only now, in every window** (`gui.keys`, `drop_mac_mnemonics`). On a Mac, wx made a button's letter answer Command plus that letter: Command-A in the name field pressed Save Change, and Command-C in the main window's report would have pressed Choose MIDI files. Wavelength found the same with Command-D.
+  - A new set saved outside a Live project folder goes in `<name> Project/` there (Live adds files beside a set when it saves). The save dialog opens where that folder will go: pointing it at a folder that didn't exist yet sent it to the MIDI file's own folder.
+  - Add Marker wants a name, and won't put a second marker where one already is (it names the one there). A stray press used to add a blank marker on top of another.
+  - The close question has two buttons, Close Anyway and Cancel (safe default; Escape answers it on a Mac). It had three, two meaning the same.
+  - Cancel comes before the main button in Tab order, as on screen.
+  - After a system file dialog VoiceOver re-reads this window from the top about 1.3 s later, so focus lands at 2.2 s (`_land(after_file_dialog=True)`) and the chosen control is heard last; the intro is one sentence because it's part of that re-read.
+  - Edit as Text keeps "(from the file)" on lines left unchanged and says "1 more than before".
+  - VoiceOver itself once stopped following focus mid-test (its cursor stuck on the preview, then silence); restarting VoiceOver fixed it and it didn't recur.
+- **The first real Sparkle update**: the Studio's 1.8.0 found 1.8.1 through Help, Check for Updates; Install Update, then Install and Relaunch, brought it back as 1.8.1 with its signature and notarization intact. Sparkle's window reads under VoiceOver ("Software Update window", the message, Install Update, Skip This Version).
 - Testing trap: `pkill -f "python app.py"` misses the app run from source, whose process is `.../MacOS/Python app.py` (capital P). Five copies piled up and VoiceOver read an old one. Kill `MacOS/Python app.py`.
 - Live itself: quit it through its menu (System Events, menu bar item 2, Quit Live) and press its Save prompt's "Don't Save" through the accessibility tree (window, `UI element 1`, the button whose description is "Don't Save"). Killing Live leaves a recovery question on the next launch. Live's log (`~/Library/Preferences/Ableton/Live x.y.z/Log.txt`) names every message box it shows.
 
@@ -195,6 +205,5 @@ Tested with VoiceOver on macOS 26 on 2026-10-11, driving the real app with keyst
 - NVDA, JAWS and Narrator on a real Windows machine. CI builds and self-tests the Windows app, but no person has used it there.
 - The Windows build has not run on a real Windows machine; CI builds and self-tests it.
 - Pro Tools has not been tested with a cleaned file.
-- The Make Ableton Set window's Change, Remove, Edit as Text and Make, heard with VoiceOver (driven from code only so far).
-- A Sparkle or WinSparkle update from 1.8.0 to a later version (the first is 1.8.0 to whatever comes next).
+- A WinSparkle update on a real Windows machine.
 - A set made on Windows opened in Live for Windows.
