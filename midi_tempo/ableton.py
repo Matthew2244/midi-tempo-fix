@@ -110,7 +110,8 @@ def midi_markers(mf) -> list[tuple[int, str]]:
                     text = raw.decode("utf-8")
                 except UnicodeDecodeError:
                     text = raw.decode("latin-1")
-                text = text.replace("\x00", "").strip()
+                # NUL and other control characters can't live in a Live set's XML
+                text = "".join(" " if ord(c) < 32 else c for c in text.replace("\x00", "")).strip()
                 if text.startswith("#"):  # REAPER can export only markers that start with #
                     text = text[1:].strip()
                 if (e.tick, text) not in seen:
@@ -265,6 +266,19 @@ def parse_markers(text: str) -> list[TypedMarker]:
     return out
 
 
+def marker_line(m: TypedMarker) -> str:
+    """A marker as one line of text, the way Edit as Text reads it back: 17 Verse, 33.3 Pickup."""
+    if m.beat == 1:
+        where = str(m.bar)
+    elif float(m.beat).is_integer():
+        where = f"{m.bar}.{int(m.beat)}"
+    else:
+        where = f"{m.bar} beat " + ("%.6f" % m.beat).rstrip("0").rstrip(".")
+    if re.match(r"(beat\b|[,;:.\t-])", m.text, re.I):
+        return f"{where} - {m.text}"  # a name that could read as a beat or a separator keeps its start
+    return f"{where} {m.text}".rstrip()
+
+
 def file_markers_typed(path: str, project: str | None = None) -> tuple[list[TypedMarker], list[str]]:
     """A MIDI file's own markers as bar and beat, so they can be edited like typed ones."""
     said: list[str] = []
@@ -290,7 +304,13 @@ def resolve_marker(sigs: list[tuple[float, int, int]], m: TypedMarker) -> float:
     num, den = [s for s in sigs if s[0] <= start + 1e-9][-1][1:]
     if m.beat >= num + 1:
         raise SetError(f"bar {m.bar} is in {num}/{den}, so it has no beat {m.beat:g} ({m.text or 'unnamed marker'})")
-    return start + (m.beat - 1) * 4 / den
+    at = start + (m.beat - 1) * 4 / den
+    nxt = bar_start(sigs, m.bar + 1)
+    if at >= nxt - 1e-9:  # a bar cut short by a time signature change partway through it
+        short = round((nxt - start) * den / 4, 3)
+        raise SetError(f"bar {m.bar} is only {short:g} beats long, so it has no beat {m.beat:g} "
+                       f"({m.text or 'unnamed marker'})")
+    return at
 
 
 def _music(path, project, said):
@@ -363,12 +383,16 @@ def plan_song(path: str | None, name: str | None = None, quick: bool = False, so
         mf = _music(path, project, said)
         tempos, sigs = _file_maps(mf, said)
         markers = [(e_tick / mf.division, text, "file") for e_tick, text in midi_markers(mf)] if file_markers else []
-        last_tick = max((e.tick for events in mf.tracks for e in events), default=0)
+        # The music's end: the last note, controller or other channel event. Not End of Track, which some
+        # apps put well after the music, and not tempo or marker events.
+        last_tick = max((e.tick for events in mf.tracks for e in events if e.raw[0] < 0xF0), default=None)
+        if last_tick is None:
+            last_tick = max((e.tick for events in mf.tracks for e in events), default=0)
         music_end = bar_at_or_after(sigs, last_tick / mf.division)
     else:
         if not name:
             raise SetError("a song made from typed markers needs a name")
-        bpm = tempo or 120.0
+        bpm = 120.0 if tempo is None else tempo
         if not MIN_BPM <= bpm <= MAX_BPM:
             raise SetError("Live's tempo runs from 20 to 999 BPM")
         num, den = signature or (4, 4)
@@ -390,8 +414,9 @@ def plan_song(path: str | None, name: str | None = None, quick: bool = False, so
     song = name or song_name_for(path)
     locs = [] if plain else [Locator(0.0, song, 0.0, "song")]
     end_locator = None
+    final = markers[-1][0] if markers else None
     for i, (b, text, _) in enumerate(markers):
-        last = i == len(markers) - 1
+        last = final is not None and abs(b - final) < 1e-9  # Outro and End can share the last beat
         if not plain and last and text.lower() in END_WORDS:
             end_locator = Locator(b, "SONG END", _seconds(tempos, b), "end", text)
             continue
@@ -654,10 +679,13 @@ class LiveSet:
               manual_sig: int | None = None) -> None:
         """Save a copy with the given locators and, if given, tempo and time signature events."""
         edits: list[tuple[int, int, str]] = [(*self.loc_span, self._locator_xml(locators))]
-        if tempo is not None:
-            edits.append(self._envelope_edit(self.tempo_target, "FloatEvent", tempo))
-        if sigs is not None:
-            edits.append(self._envelope_edit(self.sig_target, "EnumEvent", sigs))
+        for target, kind, events in ((self.tempo_target, "FloatEvent", tempo), (self.sig_target, "EnumEvent", sigs)):
+            if events is None:
+                continue
+            if isinstance(events, tuple) and events[0] == "append":
+                edits.append(self._envelope_append(target, kind, events[1]))
+            else:
+                edits.append(self._envelope_edit(target, kind, events))
         if manual_tempo is not None:
             edits.append((*self._manual("Tempo")[0], _num(manual_tempo)))
         if manual_sig is not None:
@@ -696,6 +724,16 @@ class LiveSet:
             x = re.sub(r'<IsSongStart Value="[^"]*"', '<IsSongStart Value="false"', x)
             parts.append(x)
         return "<Locators>" + "".join(parts) + "</Locators>"
+
+    def _envelope_append(self, target: str, kind: str, events: list[tuple[float, float]]) -> tuple[int, int, str]:
+        """New events added after the envelope's own, which stay exactly as written."""
+        s, e = self._envelope(target)
+        body = self.text[s:e]
+        ids = [int(x) for x in re.findall(r'<(?:Float|Enum)Event Id="(\d+)"', body)]
+        k = max(ids, default=-1) + 1
+        new = "".join(f'<{kind} Id="{k + i}" Time="{_num(t)}" Value="{_num(v)}" />' for i, (t, v) in enumerate(events))
+        close = body.rfind("</Events>")
+        return (s + close, s + close, new)
 
     def _envelope_edit(self, target: str, kind: str, events: list[tuple[float, float]]) -> tuple[int, int, str]:
         body = "<Events>" + "".join(
@@ -789,6 +827,14 @@ def _append(plan: SongPlan, at: float, tempo: list[tuple[float, float]], sigs: l
             sigs.append((t, sig_value(num, den)))
 
 
+def _tail(plan: SongPlan, at: float) -> list[tuple[float, str]]:
+    """Where a song's music really ends, when that's after its SONG END: a note locator AbleSet
+    ignores, so a song added later starts after the ringing tail, not inside it."""
+    if plan.options.get("plain") or not plan.end_from_marker or plan.span_beat <= plan.end_beat + 1e-6:
+        return []
+    return [(at + plan.span_beat, f"* {plan.name}: the music ends here")]
+
+
 def _verify(path: str, placed: list[Placed], wrote_tempo: bool) -> None:
     """Read the saved set back: the XML parses, every locator is there, and plays on time."""
     ls = LiveSet.load(path)
@@ -829,7 +875,8 @@ def live_templates() -> list[tuple[str, str]]:
     found = []
     for pat in pats:
         for p in glob.glob(pat):
-            m = re.search(r"(Ableton Live [^/\\]*?)(\.app)?[/\\]", p)
+            m = (re.search(r"(Ableton Live [^/\\]*?)\.app[/\\]", p)  # Mac: /Applications/Ableton Live 12 Suite.app
+                 or re.search(r"[/\\](Live [^/\\]+)[/\\]Resources", p))  # Windows: ...\Ableton\Live 12 Suite\Resources
             found.append((m.group(1) if m else "Ableton Live", p))
 
     def key(item):
@@ -879,7 +926,7 @@ def new_set(plans: list[SongPlan], out: str, template: str | None = None, dry_ru
         at = bar_at_or_after(cur_sigs, at)
         _append(p, at, tempo, sigs, tempo[-1][1])
         cur_sigs = [(max(t, 0.0), *sig_from_value(v)) for t, v in sigs]
-        placed.append(Placed(p, at, [(at + l.beat, l.name) for l in p.locators], "tempo"))
+        placed.append(Placed(p, at, [(at + l.beat, l.name) for l in p.locators] + _tail(p, at), "tempo"))
         at += p.span_beat
     if dry_run:
         return Result("", placed, said)
@@ -940,6 +987,10 @@ def add_to_set(set_path: str, plans: list[SongPlan], out: str | None = None, ont
             p.said = [x for x in p.said if not x.startswith("No end was typed")]  # the set says where it ends
             for l in p.locators:
                 l.seconds = tm.seconds(start + l.beat) - zero
+        span = ls._envelope(ls.tempo_target)
+        if span and "CurveControl" in ls.text[span[0]:span[1]]:
+            said.append("The set's tempo automation has curves. Comparing it with the file's tempo, they're "
+                        "counted as straight lines, so check how the markers line up by ear.")
         by_bars = [start + l.beat for l in p.locators]
         worst = max((abs((tm.seconds(b) - zero) - l.seconds) for b, l in zip(by_bars, p.locators)
                      if l.kind != "song"), default=0.0)
@@ -961,6 +1012,8 @@ def add_to_set(set_path: str, plans: list[SongPlan], out: str | None = None, ont
         for b, l in zip(beats, p.locators):
             if l.kind == "song" or (l.kind == "end" and not explicit_end and set_end):
                 continue  # a guessed end is never better than the one the set already has
+            if l.kind == "end" and explicit_end and abs(b - song_end) < 1e-6:
+                continue  # the next song starts right there and ends this one anyway
             if b >= limit - 1e-6 and not (l.kind == "end" and explicit_end and b < song_end - 1e-6):
                 if l.kind != "end" or explicit_end:  # a guessed end at the next song's start is no loss
                     left_out.append(l)
@@ -1003,11 +1056,16 @@ def add_to_set(set_path: str, plans: list[SongPlan], out: str | None = None, ont
             at = bar_at_or_after(cur_sigs, at)
             prev = LiveTempo(tempo_list, tempo_list[0][1]).bpm_at(at)
             _append(p, at, tempo_list, sig_list, prev)
-            locs = [(at + l.beat, l.name) for l in p.locators]
+            locs = [(at + l.beat, l.name) for l in p.locators] + _tail(p, at)
             keep += locs
             placed.append(Placed(p, at, locs, "tempo"))
             at += p.span_beat
-        tempo_events, sig_events = tempo_list, sig_list
+        # The set's own tempo points stay exactly as written (curves and all); only new ones are added,
+        # unless the set was empty and its starting tempo was replaced.
+        t_new = tempo_list[len(tempo_now):] if tempo_list[:len(tempo_now)] == tempo_now else None
+        s_new = sig_list[len(sig_now):] if sig_list[:len(sig_now)] == [(t, int(v)) for t, v in sig_now] else None
+        tempo_events = ("append", t_new) if t_new is not None and tempo_events else tempo_list
+        sig_events = ("append", s_new) if s_new is not None and sig_events else sig_list
         wrote_tempo = True
 
     if dry_run:

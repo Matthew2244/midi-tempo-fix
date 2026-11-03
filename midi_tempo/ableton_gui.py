@@ -32,24 +32,22 @@ def marker_row(m: A.TypedMarker, source: str) -> str:
     return f"{where}: {m.text or 'no name'}" + (" (from the file)" if source == "file" else "")
 
 
-class SeveralDialog(wx.Dialog):
-    """Type or paste many markers at once, one per line."""
+class TextDialog(wx.Dialog):
+    """Every marker as plain text, one per line: read it, edit it, paste a list in, or copy it out."""
 
-    HINT = ("One marker per line: the bar, optionally a dot and the beat, then the name.\n"
-            "17 Verse\n33.3 Pickup\n49 Chorus +LOOP\n97 End")
-
-    def __init__(self, parent):
-        super().__init__(parent, title="Type Several Markers", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+    def __init__(self, parent, text: str):
+        super().__init__(parent, title="Edit Markers as Text", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         p = wx.Panel(self)
         intro = wx.StaticText(p, label="One marker per line: the bar, then a dot and the beat if it isn't the "
-                                       "downbeat, then the name. Like 17 Verse, or 33.3 Pickup for bar 33, beat 3.")
+                                       "downbeat, then the name. Like 17 Verse, or 33.3 Pickup for bar 33, beat 3. "
+                                       "What's here replaces the list. Copy it out to keep it or share it.")
         intro.Wrap(440)
         label = wx.StaticText(p, label="&Markers")
-        self.text = wx.TextCtrl(p, style=wx.TE_MULTILINE, size=(460, 220), name="Markers")
-        self.text.SetHint(self.HINT)
+        self.text = wx.TextCtrl(p, value=text, style=wx.TE_MULTILINE, size=(460, 260), name="Markers")
+        self.text.SetHint("17 Verse\n33.3 Pickup\n49 Chorus +LOOP\n97 End")
         from .gui import mac_accessibility_label
         mac_accessibility_label(self.text, "Markers")
-        ok = wx.Button(p, wx.ID_OK, "Add These Markers")
+        ok = wx.Button(p, wx.ID_OK, "Use These Markers")
         cancel = wx.Button(p, wx.ID_CANCEL, "Cancel")
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(intro, 0, wx.ALL, 12)
@@ -61,7 +59,9 @@ class SeveralDialog(wx.Dialog):
         s.Add(b, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         p.SetSizer(s)
         s.Fit(self)
+        self.fonts = [intro, label, self.text]
         self.text.SetFocus()
+        self.text.SetInsertionPointEnd()
         ok.Bind(wx.EVT_BUTTON, self._ok)
 
     def _ok(self, _):
@@ -70,9 +70,6 @@ class SeveralDialog(wx.Dialog):
         except A.SetError as e:
             wx.MessageBox(str(e) + ".", "Markers", wx.OK, self)
             self.text.SetFocus()
-            return
-        if not self.result:
-            wx.MessageBox("There are no markers in the box yet.", "Markers", wx.OK, self)
             return
         self.EndModal(wx.ID_OK)
 
@@ -153,8 +150,9 @@ class AbletonDialog(wx.Dialog):
                                    "does the same.")
         self.remove_btn = wx.Button(p, label="&Remove")
         self.remove_btn.SetToolTip("Remove the selected marker. Delete in the list does the same.")
-        self.several_btn = wx.Button(p, label="T&ype Several...")
-        self.several_btn.SetToolTip("Type or paste many markers at once, one per line, like 17 Verse.")
+        self.several_btn = wx.Button(p, label="Edit as &Text...")
+        self.several_btn.SetToolTip("Every marker as plain text, one per line, like 17 Verse: edit them all at "
+                                    "once, paste a list in, or copy them out.")
         for b in (self.change_btn, self.remove_btn, self.several_btn):
             mk.Add(b, 0, wx.RIGHT, 8)
         s.Add(mk, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
@@ -171,7 +169,7 @@ class AbletonDialog(wx.Dialog):
         self.add_btn = wx.Button(p, label="&Add Marker")
         self.add_btn.SetToolTip("Adds the marker typed above. Return in any of the three fields does the same.")
         s.Add(self.add_btn, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
-        self.editing: int | None = None  # the row being changed, while Change has it in the fields
+        self.editing = None  # the marker being changed (the object, not its row), while Change has it
 
         self.dest = add("&Put it in", wx.Choice(p, choices=["A new Live set", "A set I already have"],
                                                  name="Put it in"))
@@ -224,6 +222,10 @@ class AbletonDialog(wx.Dialog):
             if isinstance(c, wx.ScrollBar):
                 c.DisableFocusFromKeyboard()
         self.SetSize((620, 780))
+        self._fonts([c for c in p.GetChildren() if isinstance(c, (wx.StaticText, wx.TextCtrl, wx.ListBox,
+                                                                    wx.CheckBox))])
+        p.Layout()
+        p.FitInside()
         self.SetMinSize((480, 420))
         self.CentreOnParent()
 
@@ -267,6 +269,8 @@ class AbletonDialog(wx.Dialog):
         self.path = path
         self._loading = True
         self.items = [(m, t) for m, t in self.items if t == "typed"]
+        if getattr(self, "editing", None) is not None and not any(m is self.editing for m, _ in self.items):
+            self._stop_editing()
         if path:
             try:
                 file_items, _ = A.file_markers_typed(path)
@@ -393,8 +397,8 @@ class AbletonDialog(wx.Dialog):
         if dry_run:
             return A.new_set(plans, "", dry_run=True)
         if which == 2:
-            return [A.new_set([p], A.default_new_set_path(p)) for p in plans]
-        return A.new_set(plans, self.out_path)
+            return [A.new_set([p], A.default_new_set_path(p), self.template) for p in plans]
+        return A.new_set(plans, self.out_path, self.template)
 
     def _update_preview(self):
         self._preview_timer = None
@@ -467,6 +471,21 @@ class AbletonDialog(wx.Dialog):
         self.main.tell("No MIDI file. Type the markers, tempo and time signature.")
         self.tempo.SetFocus()
 
+    def _fonts(self, ctrls):
+        """View, Bigger Text reaches this window too: labels, fields, the list and the preview grow.
+        Buttons and popups keep the system size, as in the main window (a bigger font clips them)."""
+        pt = getattr(self.main, "text_pt", 0)
+        if not pt or pt == getattr(self.main, "default_pt", pt):
+            return
+        for c in ctrls:
+            f = c.GetFont()
+            f.SetPointSize(pt)
+            c.SetFont(f)
+            c.InvalidateBestSize()
+        intro = [c for c in ctrls if isinstance(c, wx.StaticText) and len(c.GetLabel()) > 120]
+        for c in intro:
+            c.Wrap(max(300, self.GetClientSize().width - 60))
+
     def _say(self, text: str):
         from .gui import announce
         announce(text)
@@ -497,6 +516,10 @@ class AbletonDialog(wx.Dialog):
 
     def _selected(self) -> int:
         return self.list.GetSelection()
+
+    def _stop_editing(self):
+        self.editing = None
+        self.add_btn.SetLabel("&Add Marker")
 
     def _typed_marker(self) -> A.TypedMarker | None:
         try:
@@ -548,9 +571,10 @@ class AbletonDialog(wx.Dialog):
                 self.m_beat.SetFocus()
                 self.m_beat.SetSelection(-1, -1)
                 return
-        changing = self.editing is not None and 0 <= self.editing < len(self.items)
+        rows = [i for i, (x, _) in enumerate(self.items) if x is self.editing]
+        changing = bool(rows)
         if changing:
-            self.items[self.editing] = (m, "typed")
+            self.items[rows[0]] = (m, "typed")
         else:
             self.items.append((m, "typed"))
         self.items.sort(key=lambda x: (x[0].bar, x[0].beat))
@@ -571,14 +595,15 @@ class AbletonDialog(wx.Dialog):
         if not 0 <= sel < len(self.items):
             return
         m = self.items[sel][0]
-        self.editing = sel
+        self.editing = m
         self.m_bar.SetValue(str(m.bar))
         self.m_beat.SetValue(_beat_text(m.beat))
         self.m_name.SetValue(m.text)
         self.add_btn.SetLabel("S&ave Change")
         self.m_bar.SetFocus()
         self.m_bar.SetSelection(-1, -1)
-        wx.CallLater(700, lambda: self._say(f"Changing {marker_row(*self.items[sel])}. Edit it, then press Return."))
+        said = f"Changing {marker_row(*self.items[sel])}. Edit it, then press Return."
+        wx.CallLater(700, lambda: self._say(said))
 
     def on_cancel(self, e):
         typed = sum(1 for _, t in self.items if t == "typed")
@@ -597,21 +622,37 @@ class AbletonDialog(wx.Dialog):
         if not 0 <= sel < len(self.items):
             return
         m, t = self.items.pop(sel)
+        if m is self.editing:
+            self._stop_editing()
         self._fill(min(sel, len(self.items) - 1) if self.items else None)
         self.main.tell(f"Removed {marker_row(m, t)}. {len(self.items)} markers left.")
         (self.list if self.items else self.m_bar).SetFocus()
 
     def on_several(self, _):
-        with SeveralDialog(self) as d:
+        before = len(self.items)
+        with TextDialog(self, "\n".join(A.marker_line(m) for m, _ in self.items)) as d:
+            self._fonts(d.fonts)
+            d.Fit()
             if d.ShowModal() != wx.ID_OK:
                 return
             new = d.result
-        self.items += [(m, "typed") for m in new]
-        self.items.sort(key=lambda x: (x[0].bar, x[0].beat))
-        self._fill(next(i for i, x in enumerate(self.items) if x[0] is new[0]))
-        self.main.SetStatusText(f"Added {len(new)} markers. {len(self.items)} in all.")
-        self._land(self.list)
-        wx.CallLater(1400, lambda: self._say(f"Added {len(new)} markers, {len(self.items)} in all."))
+        sigs = self._song_sigs() if not (self._onto() and not self.path) else None
+        if sigs:
+            for m in new:
+                try:
+                    A.resolve_marker(sigs, m)
+                except A.SetError as e:
+                    msg = str(e)
+                    wx.MessageBox(msg[0].upper() + msg[1:] + ". Nothing was changed.", "Markers", wx.OK, self)
+                    return
+        self.items = sorted(((m, "typed") for m in new), key=lambda x: (x[0].bar, x[0].beat))
+        self.editing = None
+        self.add_btn.SetLabel("&Add Marker")
+        self._fill(0)
+        said = f"{len(self.items)} markers now, {len(self.items) - before:+d}."
+        self.main.SetStatusText(said)
+        self._land(self.list if self.items else self.m_bar)
+        wx.CallLater(1400, lambda: self._say(said))
 
     def on_choose_set(self, _):
         with wx.FileDialog(self, "Choose the Live set to add it to",
@@ -651,6 +692,28 @@ class AbletonDialog(wx.Dialog):
             return
         existing = self.dest.GetSelection() == self.EXISTING
         which = self.songs_choice.GetSelection() if self.songs_choice else 0
+        if existing and which == 2:
+            wx.MessageBox("One set each makes new sets, so it doesn't go with a set you already have. Choose "
+                          "back to back, or put them in a new set.", "Make an Ableton Set", wx.OK, self)
+            return
+        self.template = None
+        if not existing:
+            kept = self.cfg.Read("ableton_template", "")
+            if kept and os.path.exists(kept):
+                self.template = kept
+            elif not A.live_templates():
+                # No Live found where it usually lives (another drive, a portable copy): any set will do
+                wx.MessageBox("Live's own empty set wasn't found on this computer, so choose a Live set to start "
+                              "from. An empty one is best. It's remembered for next time, and never changed.",
+                              "Make an Ableton Set", wx.OK, self)
+                with wx.FileDialog(self, "Choose a Live set to start new sets from",
+                                   wildcard="Live sets (*.als)|*.als|All files|*.*",
+                                   style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as d:
+                    if d.ShowModal() != wx.ID_OK:
+                        return
+                    self.template = d.GetPath()
+                self.cfg.Write("ableton_template", self.template)
+                self.cfg.Flush()
         if not existing and which != 2:
             first = plans[0]
             default = (A.default_new_set_path(first) if first.path else

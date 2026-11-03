@@ -77,7 +77,8 @@ def test_markers_become_ableset_locators(tmp_path, template):
     assert names == [(0, "Fresh Air"), (0, "> Intro"), (32, "> Verse 1"), (64, "> Stop"), (96, "SONG END")]
     r = A.new_set([p], str(tmp_path / "Out Project" / "Out.als"), template)
     got = [(l.beat, l.name) for l in A.LiveSet.load(r.path).locators()]
-    assert got == names
+    # the note rings a bar past SONG END: a note locator AbleSet ignores marks where it stops
+    assert got == names + [(100, "* Fresh Air: the music ends here")]
     assert "music goes on 1 bar past" in " ".join(p.said)
 
 
@@ -212,3 +213,71 @@ def test_new_set_never_overwrites(tmp_path, template):
     A.new_set([p], out, template)
     with pytest.raises(A.SetError, match="already exists"):
         A.new_set([p], out, template)
+
+
+def test_markers_as_text_round_trip():
+    ms = [A.TypedMarker(17, 1, "Verse"), A.TypedMarker(33, 3, "Pickup"), A.TypedMarker(214, 2.008333, ""),
+          A.TypedMarker(9, 1, "2nd verse"), A.TypedMarker(5, 2.5, "> Chorus +LOOP"), A.TypedMarker(7, 1, "3.5 reprise")]
+    assert A.parse_markers("\n".join(A.marker_line(m) for m in ms)) == ms
+
+
+def test_curved_tempo_points_are_kept_when_a_song_is_added(tmp_path):
+    curved = ('<FloatEvent Id="0" Time="-63072000" Value="120" />'
+              '<FloatEvent Id="1" Time="8" Value="120" CurveControl1X="0.5" CurveControl1Y="0.2" '
+              'CurveControl2X="0.5" CurveControl2Y="0.8" /><FloatEvent Id="2" Time="16" Value="100" />')
+    s = live_set(tmp_path / "Show.als", [(0, "Opener", "")], tempo_events=curved, clip_end=16)
+    r = A.add_to_set(s, [A.plan_song(None, "Two", typed=A.parse_markers("1 Intro\n3 End"))])
+    text = A.LiveSet.load(r.path).text
+    assert 'CurveControl1X="0.5" CurveControl1Y="0.2"' in text
+    ids = [int(x) for x in __import__("re").findall(r'<FloatEvent Id="(\d+)"', text)]
+    assert len(ids) == len(set(ids))
+
+
+def test_windows_live_folders_sort_newest_first_betas_last(monkeypatch):
+    paths = [r"C:\ProgramData\Ableton\Live 11 Suite\Resources\Builtin\Templates\DefaultLiveSet.als",
+             r"C:\ProgramData\Ableton\Live 12 Beta\Resources\Builtin\Templates\DefaultLiveSet.als",
+             r"C:\ProgramData\Ableton\Live 12 Suite\Resources\Builtin\Templates\DefaultLiveSet.als"]
+    monkeypatch.setattr(A.sys, "platform", "win32")
+    monkeypatch.setattr(A.glob, "glob", lambda pat: paths)
+    assert [name for name, _ in A.live_templates()] == ["Live 12 Suite", "Live 11 Suite", "Live 12 Beta"]
+
+
+def test_end_marker_at_the_next_song_is_not_reported_lost(tmp_path):
+    s = live_set(tmp_path / "Show.als", [(0, "Song A", ""), (32, "Song B", "")])
+    p = A.plan_song(midi(tmp_path / "a.mid", [(4 * PPQ * 4, marker("Verse")), (8 * PPQ * 4, marker("End"))]))
+    r = A.add_to_set(s, [p], onto="Song A")
+    assert not any("left out" in x for x in r.said)
+
+
+def test_a_song_added_later_starts_after_a_ringing_tail(tmp_path, template):
+    m = midi(tmp_path / "Ring.mid", [(0, marker("Intro")), (4 * PPQ * 4, marker("End")),
+                                     (4 * PPQ * 4, bytes([0x90, 60, 90])), (8 * PPQ * 4, bytes([0x80, 60, 0]))])
+    first = A.new_set([A.plan_song(m)], str(tmp_path / "Set.als"), template)
+    r = A.add_to_set(first.path, [A.plan_song(None, "Next", typed=A.parse_markers("1 Intro\n3 End"))])
+    next_start = [l.beat for l in A.LiveSet.load(r.path).locators() if l.name == "Next"][0]
+    assert next_start >= 32  # the note rings to bar 9, past SONG END at bar 5
+
+
+def test_a_beat_past_a_short_bar_is_refused():
+    with pytest.raises(A.SetError, match="only 2 beats long"):
+        A.plan_song(None, "S", typed=A.parse_markers("2.4 Too late"), set_sigs=[(0.0, 4, 4), (6.0, 3, 4)])
+
+
+def test_song_end_ignores_a_late_end_of_track(tmp_path):
+    m = tmp_path / "late.mid"
+    tr = track([(0, tempo(120)), (0, timesig(4, 2)), (0, marker("Intro")), (0, bytes([0x90, 60, 90])),
+                (PPQ, bytes([0x80, 60, 0])), (40 * PPQ * 4, text("trailing", 1))])
+    m.write_bytes(smf([tr]))
+    p = A.plan_song(str(m))
+    assert [l.beat for l in p.locators if l.name == "SONG END"] == [4.0]
+
+
+def test_end_can_share_the_last_beat_with_another_marker(tmp_path):
+    p = A.plan_song(None, "S", typed=A.parse_markers("5 End\n5 Outro\n1 Intro"))
+    assert [l.name for l in p.locators if l.beat == 16] == ["> Outro", "SONG END"]
+
+
+def test_awkward_names_survive_edit_as_text():
+    ms = [A.TypedMarker(9, 1, "Beat 2 drop"), A.TypedMarker(10, 1, ": Chorus"), A.TypedMarker(11, 3, "- tag"),
+          A.TypedMarker(12, 1, ".hidden")]
+    assert A.parse_markers("\n".join(A.marker_line(m) for m in ms)) == ms

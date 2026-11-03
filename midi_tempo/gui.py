@@ -36,7 +36,8 @@ COMPARE_WILDCARD = (
 )
 INTRO = (
     "Checks MIDI files from any app for the tempo and note mistakes that make apps play them "
-    "differently. Nothing changes until you press Fix, and your originals are never changed."
+    "differently, and turns their markers into Ableton Live sets for AbleSet. Nothing changes until "
+    "you press Fix, and your originals are never changed."
 )
 DAY = 24 * 3600
 BRIEF_OVER = 20  # more files than this: list only what needs fixing, so the report stays listenable
@@ -284,6 +285,7 @@ class MainFrame(wx.Frame):
         m_cmp = f.Append(wx.ID_ANY, "Com&pare with another file...\tCtrl+R")
         m_abl = f.Append(wx.ID_ANY, "Make &Ableton Set...\tCtrl+L")
         m_abl_show = f.Append(wx.ID_ANY, "Show the Last Ableton Set\tCtrl+Shift+L")
+        m_abl_open = f.Append(wx.ID_ANY, "Open the Last Ableton Set in Live")
         f.AppendSeparator()
         m_save_rep = f.Append(wx.ID_ANY, "Save &report as text...")
         f.AppendSeparator()
@@ -316,6 +318,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_compare, m_cmp)
         self.Bind(wx.EVT_MENU, self.on_ableton, m_abl)
         self.Bind(wx.EVT_MENU, self.on_show_ableton, m_abl_show)
+        self.Bind(wx.EVT_MENU, self.on_open_ableton, m_abl_open)
         self.Bind(wx.EVT_MENU, lambda e: reveal(self.saved), m_show)
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), m_quit)
         self.Bind(wx.EVT_MENU, self.on_about, m_about)
@@ -486,10 +489,28 @@ class MainFrame(wx.Frame):
         lines = []
         for r in results:
             lines += A.describe_result(r) + [""]
-        lines.append("File, Show the Last Ableton Set (Ctrl-Shift-L) shows it in the "
-                     + ("Finder." if sys.platform == "darwin" else "folder."))
+        key = "Command" if sys.platform == "darwin" else "Control"
+        lines.append(f"File, Open the Last Ableton Set in Live opens it. File, Show the Last Ableton Set "
+                     f"({key}-Shift-L) shows it in the " + ("Finder." if sys.platform == "darwin" else "folder."))
         self.ableton_sets = [r.path for r in results]
         self.show(lines)
+
+    def on_open_ableton(self, _=None):
+        """Open the set with whatever opens .als files here, which is Live wherever Live is installed."""
+        if not self.ableton_sets:
+            self.tell("No Ableton set made yet.")
+            return
+        path = self.ableton_sets[0]
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            elif sys.platform == "win32":
+                os.startfile(path)  # noqa: S606 - the user's own file, opened with its own app
+            else:
+                subprocess.Popen(["xdg-open", path])
+            self.tell(f"Opening {os.path.basename(path)} in Live.")
+        except OSError as e:
+            self.tell(f"Couldn't open it: {e}.")
 
     def on_show_ableton(self, _=None):
         if self.ableton_sets:
@@ -924,7 +945,8 @@ class MainFrame(wx.Frame):
 
     def on_about(self, _):
         wx.MessageBox(
-            f"{APP_NAME} {__version__}\n\nChecks and fixes MIDI tempo maps so every app plays them the same.\n"
+            f"{APP_NAME} {__version__}\n\nChecks and fixes MIDI tempo maps so every app plays them the same, "
+            "and makes Ableton Live sets from their markers.\n"
             "Free and open source, MIT license.",
             f"About {APP_NAME}", wx.OK | wx.ICON_INFORMATION, self,
         )

@@ -111,6 +111,17 @@ Markers become Live locators named the way AbleSet reads them (`> Verse`, the so
 
 **Into a set you have** (`add_to_set`): songs are AbleSet's (`is_song_locator`: not `>`, `*`, `[`, a command, or a digits-only name when there's a Sections track). After the last song means the next bar line past every clip end in `ArrangerAutomation`, every locator and every tempo event, with the song's own tempo map. Onto a song replaces its `>` locators (and digits-only ones with a Sections track), keeps `*` notes, ClyphX, STOP and its song locator exactly, and leaves the tempo alone. If the set's tempo differs from the file's by more than 5 ms at any marker, `NeedsLineUp` asks: by bar or by time. Markers past where the song ends in the set (the next song, or its SONG END) are left out and named; a guessed end is never said to be lost. The copy is `(markers added)`; `--update-set` writes the set itself after copying it to `(before markers)`. Every write goes to a `.check` file first, is read back (`_verify`: the XML parses, ids are unique, every locator is there, and with a tempo map written each plays within 1 ms of its marker), then renamed into place.
 
+**From a review on 2026-11-03, each fault reproduced, fixed, and kept by a test:**
+- A set's own tempo points are never rebuilt: adding a song after the last one appends new events (`_envelope_append`, ids after the highest), so Live 12's curved points (`CurveControl1X` and so on) survive. `LiveTempo` still treats curves as straight lines, so onto a song with curves the report says to check the line-up by ear.
+- Change, then Remove, then Save Change used to overwrite the wrong row: the window now holds the marker being changed, not its index.
+- On Windows the Live folders are `Live 12 Suite`, not `Ableton Live 12 Suite`; `live_templates()` reads both, so the newest Live comes first and betas last there too.
+- An End marker exactly where the next song starts is dropped quietly, not reported as lost.
+- A song whose music rings past its SONG END gets a note locator, `* Song: the music ends here` (AbleSet ignores `*`), so a song added later starts after the tail, not inside it.
+- A typed beat past the end of a bar a time signature change cut short is refused ("bar 2 is only 2 beats long").
+- The music's end is the last channel event (notes, controllers), never End of Track, which some apps put far later. An End marker can share the last beat with another marker. Control characters in marker text become spaces.
+- Edit as Text writes `9 - Beat 2 drop` for a name that could read as a beat or a separator, so it comes back unchanged.
+- The command refuses `--onto` without `--into`, `--update-set` with `-o`, and `--each` with `--into`.
+
 **New sets start from the installed Live's own `DefaultLiveSet.als`** (`live_templates()`: `/Applications/Ableton Live*.app/.../Builtin/Templates`, `%ProgramData%\Ableton\Live*\Resources\Builtin\Templates`), newest first, betas last, or a set chosen to start from. Ableton's file is never shipped in this repo; the tests use a made-up minimal set (`tests/test_ableton.py`).
 
 **The window, and what VoiceOver taught it** (heard on 2026-11-03):
@@ -119,7 +130,10 @@ Markers become Live locators named the way AbleSet reads them (`> Verse`, the so
 - No spin control: its stepper took its own Tab stop ("50%, Bar, stepper"). The scroll bar is out of the Tab order.
 - What doesn't apply is hidden, not dimmed (tempo with a file, the set choices with a new set, Line up by unless it can matter).
 - Cancel with typed markers asks first (Close / Keep Working).
-- Verified by ear: labels, Tab order both ways, adding markers. Change, Remove, Type Several, the preview and Make were driven from code (add, change, remove, refuse an impossible beat, save a new set, pick the matching song in an existing set), not yet heard.
+- Edit as Text shows every marker as a line (`marker_line`, which `parse_markers` reads back exactly, tested) to edit all at once, paste a list or copy it out; what's there replaces the list, and an impossible beat changes nothing.
+- View, Bigger Text reaches this window (labels, fields, list, preview; buttons and popups keep the system size, as in the main window). The intro is wrapped after the window has its size.
+- No Live where `live_templates()` looks: the window asks for a set to start from once and remembers it (`ableton_template` in wx.Config).
+- Verified by ear: labels, Tab order both ways, adding markers. Change, Remove, Edit as Text, the preview and Make were driven from code (add, change, remove, refuse an impossible beat, save a new set, pick the matching song in an existing set), not yet heard.
 - Testing trap: `pkill -f "python app.py"` misses the app run from source, whose process is `.../MacOS/Python app.py` (capital P). Five copies piled up and VoiceOver read an old one. Kill `MacOS/Python app.py`.
 - Live itself: quit it through its menu (System Events, menu bar item 2, Quit Live) and press its Save prompt's "Don't Save" through the accessibility tree (window, `UI element 1`, the button whose description is "Don't Save"). Killing Live leaves a recovery question on the next launch. Live's log (`~/Library/Preferences/Ableton/Live x.y.z/Log.txt`) names every message box it shows.
 
@@ -181,6 +195,6 @@ Tested with VoiceOver on macOS 26 on 2026-10-11, driving the real app with keyst
 - NVDA, JAWS and Narrator on a real Windows machine. CI builds and self-tests the Windows app, but no person has used it there.
 - The Windows build has not run on a real Windows machine; CI builds and self-tests it.
 - Pro Tools has not been tested with a cleaned file.
-- The Make Ableton Set window's Change, Remove, Type Several and Make, heard with VoiceOver (driven from code only so far).
+- The Make Ableton Set window's Change, Remove, Edit as Text and Make, heard with VoiceOver (driven from code only so far).
 - A Sparkle or WinSparkle update from 1.8.0 to a later version (the first is 1.8.0 to whatever comes next).
 - A set made on Windows opened in Live for Windows.

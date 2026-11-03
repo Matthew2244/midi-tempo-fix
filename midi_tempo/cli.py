@@ -149,6 +149,15 @@ def cmd_ableton(a) -> int:
                                                                      else f" (locator: {s.name})"))
             print("\n".join(lines))
             return 0
+        if a.onto and not a.into:
+            print("--onto names a song in a set you already have; give the set with --into.")
+            return 2
+        if a.update_set and a.output:
+            print("--update-set changes the set itself, so it doesn't take -o.")
+            return 2
+        if a.each and a.into:
+            print("--each makes a new set per file, so it doesn't go with --into.")
+            return 2
         typed = []
         if a.markers:
             text = sys.stdin.read() if a.markers == "-" else open(a.markers, encoding="utf-8-sig").read()
