@@ -437,6 +437,11 @@ class AbletonDialog(wx.Dialog):
                         "replaced" if pl.replaced else "it has no section locators yet")
                 lines.append(f"Onto {pl.plan.name} at bar {bar}: {gone}, and the set's tempo is kept" +
                              (", which matches the file's." if pl.worst <= A.SAME_SECONDS and self.path else "."))
+                if pl.gone:
+                    lines.append("There now, and replaced:")
+                    sigs = self.live_set.sigs()
+                    for gb, gname in pl.gone:
+                        lines.append(f"  {A.where_text(sigs, gb, capital=True)}: {gname}")
         lines += [x for x in r.said if not x.startswith("If this set is open")]
         return lines
 

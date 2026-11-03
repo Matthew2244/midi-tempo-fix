@@ -45,6 +45,7 @@ def as_json(path: str, name: str, r, notes: bool, compare: list[str] | None, ext
         "doubled_tempos": [{"tick": d.tick, "lost_bpm": round(d.lost_bpm, 4), "winning_bpm": round(d.winning_bpm, 4)}
                            for d in r.doubled],
         "reaper_ramp_notes": r.hints, "misplaced_tempo_events": r.misplaced, "smpte_fps": r.smpte,
+        "markers": r.markers,
         "notes": {"duplicates": c.duplicates, "overlaps": c.overlaps, "stuck": c.stuck,
                   "stray_releases": c.stray_offs, "zero_length": c.zero_length},
     }
@@ -136,18 +137,7 @@ def cmd_ableton(a) -> int:
 
     try:
         if a.songs:
-            ls = A.LiveSet.load(a.songs)
-            songs = A.set_songs(ls)
-            if not songs:
-                print(f"{os.path.basename(a.songs)} has no songs yet: no locators AbleSet reads as songs.")
-                return 0
-            sigs = ls.sigs()
-            lines = [f"{os.path.basename(a.songs)}: {len(songs)} song{'s' if len(songs) != 1 else ''}."]
-            for s, _ in songs:
-                bar, _beat = A.bar_number(sigs, s.beat)
-                lines.append(f"Bar {bar}: {A.song_title(s.name)}" + ("" if A.song_title(s.name) == s.name
-                                                                     else f" (locator: {s.name})"))
-            print("\n".join(lines))
+            print("\n".join(A.describe_set(A.LiveSet.load(a.songs))))
             return 0
         if a.onto and not a.into:
             print("--onto names a song in a set you already have; give the set with --into.")
@@ -285,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
                          "aren't warped).")
     ab.add_argument("--update-set", action="store_true",
                     help="With --into: change the set itself, keeping the old one as (before markers).")
-    ab.add_argument("--songs", metavar="SET.als", help="List the songs in a set, to pick one for --onto.")
+    ab.add_argument("--songs", metavar="SET.als",
+                    help="List the songs in a set and each one's sections, by bar, to pick one for --onto.")
     ab.add_argument("--each", action="store_true", help="One set per MIDI file, for AbleSet's multi-file projects.")
     ab.add_argument("--template", metavar="SET.als",
                     help="A set to start new sets from. Default: the empty set inside your installed Live.")

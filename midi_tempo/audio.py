@@ -73,8 +73,12 @@ def _read_wav(path: str):
         i += 8 + size + (size & 1)
     if fmt is None or data is None:
         raise MidiError("the WAV file has no audio in it")
+    if len(fmt) < 16:
+        raise MidiError("the WAV file's format block is too short to read")
     tag, ch, rate = struct.unpack("<HHI", fmt[:8])
     bits = struct.unpack("<H", fmt[14:16])[0]
+    if ch == 0 or bits < 8 or rate == 0:
+        raise MidiError("the WAV file says it has no channels or no samples, so it can't be read")
     if tag == 0xFFFE and len(fmt) >= 26:  # WAVE_FORMAT_EXTENSIBLE: the real format is in the GUID
         tag = struct.unpack("<H", fmt[24:26])[0]
     width = bits // 8

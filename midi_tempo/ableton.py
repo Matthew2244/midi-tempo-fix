@@ -183,20 +183,30 @@ def bar_at_or_after(sigs: list[tuple[float, int, int]], beat: float) -> float:
     raise AssertionError("bar lines never end")
 
 
-def bar_number(sigs: list[tuple[float, int, int]], beat: float) -> tuple[int, float]:
-    """(bar, beat within it), both counting from 1, beats in the time signature's own unit."""
+def bar_number(sigs: list[tuple[float, int, int]], beat: float, snap: float = 1e-6) -> tuple[int, float]:
+    """(bar, beat within it), both counting from 1, beats in the time signature's own unit.
+
+    snap: how close to a bar line counts as on it. Exact by default; what's said aloud
+    uses where_text(), which reads a hair before a bar line as that bar, not "beat 5 of 4".
+    """
     prev, bar = 0.0, 0
     for b in _bar_lines(sigs):
-        if b > beat + 1e-6:
+        if b > beat + snap:
             break
         prev, bar = b, bar + 1
     den = [s for s in sigs if s[0] <= prev + 1e-9][-1][2]
-    return max(bar, 1), (beat - prev) * den / 4 + 1
+    return max(bar, 1), max(0.0, beat - prev) * den / 4 + 1
+
+
+def where_text(sigs, beat: float, capital: bool = False) -> str:
+    """'bar 12, beat 3.5', as said aloud: to two decimals, and a hair before a bar line is that bar."""
+    bar, b = bar_number(sigs, beat, snap=0.01)
+    text = f"bar {bar}" + (f", beat {round(b, 2):g}" if round(b, 2) > 1 else "")
+    return text[0].upper() + text[1:] if capital else text
 
 
 def _where(sigs, beat: float) -> str:
-    bar, b = bar_number(sigs, beat)
-    return f"bar {bar}" + (f", beat {round(b, 2):g}" if b > 1 + 1e-6 else "")
+    return where_text(sigs, beat)
 
 
 def _beats_words(beats: float, sigs, at: float) -> str:
@@ -778,6 +788,43 @@ def song_title(locator: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def section_clips(ls: LiveSet) -> list[tuple[float, str]]:
+    """(beat, name) of every clip on AbleSet's Sections track, the other way songs get sections."""
+    out = []
+    for m in re.finditer(r"<MidiTrack[ >]", ls.text):
+        end = ls.text.find("</MidiTrack>", m.start())
+        track = ls.text[m.start():end]
+        nm = re.search(r'<EffectiveName Value="([^"]*)"', track)
+        name = html.unescape(nm.group(1)) if nm else ""
+        if name.strip().lower() != "sections" and "+SECTIONS" not in name:
+            continue
+        for block in re.findall(r"<ArrangerAutomation>(.*?)</ArrangerAutomation>", track, re.S):
+            for c in re.finditer(r'<MidiClip Id="\d+" Time="([^"]+)"', block):
+                cn = re.search(r'<Name Value="([^"]*)"', block[c.end():])
+                out.append((float(c.group(1)), html.unescape(cn.group(1)) if cn else ""))
+    return sorted(out)
+
+
+def describe_set(ls: LiveSet) -> list[str]:
+    """Every song in a set and its sections, by bar, the way AbleSet will show them."""
+    songs = set_songs(ls)
+    sigs = ls.sigs()
+    name = os.path.basename(ls.path)
+    if not songs:
+        return [f"{name} has no songs yet: no locators AbleSet reads as songs."]
+    clips = section_clips(ls)
+    lines = [f"{name}: {n(len(songs), 'song')}."]
+    for s, end in songs:
+        lines.append(f"{where_text(sigs, s.beat, capital=True)}: {song_title(s.name)}"
+                     + ("" if song_title(s.name) == s.name else f" (locator: {s.name})"))
+        here = [(l.beat, l.name) for l in ls.locators() if s.beat <= l.beat < end and l is not s
+                and not is_song_locator(l.name)]
+        here += [(b, f"{nm} (section clip)") for b, nm in clips if s.beat <= b < end]
+        for b, nm in sorted(here):
+            lines.append(f"  {where_text(sigs, b, capital=True)}: {nm}")
+    return lines
+
+
 def set_songs(ls: LiveSet) -> list[tuple[SetLocator, float]]:
     """Each song's locator and where it ends (the next song, or infinity)."""
     st = ls.has_sections_track()
@@ -795,6 +842,7 @@ class Placed:
     line_up: str  # "tempo" (wrote its tempo map), "bars" or "time"
     left_out: list[Locator] = field(default_factory=list)
     replaced: int = 0  # section locators removed from a song already there
+    gone: list = field(default_factory=list)  # (beat, name) of every locator taken out
     worst: float = 0.0  # how far the set's tempo and the file's disagree, seconds
 
 
@@ -1035,7 +1083,8 @@ def add_to_set(set_path: str, plans: list[SongPlan], out: str | None = None, ont
 
         removed = [k for k in keep if replaceable(k[0], k[1])]
         keep = [k for k in keep if not replaceable(k[0], k[1])] + new
-        pl = Placed(p, start, new, how, left_out, len([r for r in removed if r[1].strip().startswith(">")]), worst)
+        pl = Placed(p, start, new, how, left_out, len([r for r in removed if r[1].strip().startswith(">")]), worst,
+                    [(r[0], r[1]) for r in removed])
         placed.append(pl)
         if left_out:
             one = len(left_out) == 1
@@ -1112,8 +1161,7 @@ def describe_plan(p: SongPlan) -> list[str]:
     lines = [head + f". {tempo}, {sig}."]
     lines += p.said
     for loc in p.locators:
-        bar, beat = bar_number(p.sigs, loc.beat)
-        where = f"Bar {bar}" + (f", beat {round(beat, 2):g}" if beat > 1 + 1e-6 else "")
+        where = where_text(p.sigs, loc.beat, capital=True)
         lines.append(f"{where}: {loc.name}" + (" (where the music ends)" if loc.kind == "end" and
                                                 not p.end_from_marker else ""))
     return lines

@@ -24,7 +24,7 @@ from . import __version__, sparkle, update, winsparkle
 from .batch import check_many, fix_many
 import webbrowser
 
-from .core import (PROJECT_PROBLEM, MidiError, analyze, compare_with, describe, fix_file, midi_files,
+from .core import (PROJECT_PROBLEM, MidiError, analyze, compare_with, describe, fix_file, fixed_name, midi_files,
                    needs_project_fix, problems, read_midi, summary, verdict)
 
 APP_NAME = "MIDI Tempo Fix"
@@ -445,10 +445,13 @@ class MainFrame(wx.Frame):
     # -------------------------------------------------------- the files list
 
     def _fill_list(self, keep_selection: bool = False):
-        sel = self.list.GetSelection()
+        # Keep the same file selected, not the same row: a re-sort (after comparing with a REAPER
+        # project) moves files, and Make Ableton Set starts from the selected one.
+        want = getattr(self, "_selected_path", None)
         self.list.Set([self._entry_text(e) for e in self.entries])
-        if keep_selection and 0 <= sel < len(self.entries):
-            self.list.SetSelection(sel)
+        rows = [i for i, e in enumerate(self.entries) if e[0] == want]
+        if keep_selection and rows:
+            self.list.SetSelection(rows[0])
 
     def _entry_text(self, entry) -> str:
         path, r, err = entry[:3]
@@ -471,6 +474,7 @@ class MainFrame(wx.Frame):
         if not (0 <= i < len(self.entries)):
             return
         path, r, err = self.entries[i][:3]
+        self._selected_path = path
         if r is None:
             self.set_report([err])
             return
@@ -553,8 +557,12 @@ class MainFrame(wx.Frame):
             return
         missing = [p for p in paths if not os.path.exists(p)]
         files = midi_files([p for p in paths if os.path.exists(p)], recursive=True)
+        # Nothing from the last batch carries over: Fix and Compare in the menu only reach what's shown
+        self.files, self.fixable, self.project_for = [], [], {}
+        self.chosen = list(paths)  # what was chosen, folders and all, so a re-check keeps subfolder names
         if not files:
-            self.files, self.fixable = [], []
+            self.entries = []
+            self.list.Clear()
             self.fix.Disable()
             self.compare.Disable()
             self.show([f"{os.path.basename(p)}: not found." for p in missing] + ["No MIDI files to check there."])
@@ -699,7 +707,7 @@ class MainFrame(wx.Frame):
         self.cfg.WriteBool("check_notes", self.notes.GetValue())
         self.cfg.Flush()
         if self.files:
-            self.check(self.files, focus_report=False)
+            self.check(getattr(self, "chosen", None) or self.files, focus_report=False)
 
     def _last_dir(self) -> str:
         d = self.cfg.Read("last_dir", "")
@@ -815,8 +823,7 @@ class MainFrame(wx.Frame):
         with wx.DirDialog(self, f"Can't save next to {name}. Choose a folder for the cleaned copy.") as dlg:
             if dlg.ShowModal() != wx.ID_OK:
                 return None, [f"{name}: not fixed, no folder chosen."]
-            stem, ext = os.path.splitext(name)
-            out = os.path.join(dlg.GetPath(), f"{stem} (tempo fixed){ext or '.mid'}")
+            out = os.path.join(dlg.GetPath(), os.path.basename(fixed_name(p)))  # a fixed .rmi is a .mid
         try:
             return fix_file(p, out, notes=self.notes.GetValue(), project=self.project_for.get(p))
         except (MidiError, OSError) as e:

@@ -87,6 +87,21 @@ Tempo map events moved to the first track are de-duplicated, keeping the LAST id
 
 Verification for note fixes: every note start (track, moment, channel, key, first velocity) is identical before and after, every non-note event is at the same moment, and the copy has nothing left to fix.
 
+## Second review, 2026-11-03
+
+A review of this half ran 17,120 real MIDI files through read, analyze, describe, fix and compare (0 crashes, 0 failed verifications) and 3,000 fuzzed ones, then found seven faults that only corrupt or unusual input reaches. Each was reproduced, fixed and is kept by a test:
+- One bad file used to end a whole batch with a traceback (command exit 1, the "needs fixing" code). `read_midi` now refuses a channel event cut short, a tempo event that isn't 3 bytes or is 0, and a header with 0 ticks per beat; `batch._check_one` / `_fix_one` also catch anything else per file.
+- A time signature with numerator 0 or a denominator past 64 is skipped (`time_signatures`), and `bar_beat` never divides by a zero-length bar.
+- `export_has_short_bar_fault` said yes when no short bar fell inside the file's tempo map (`all()` of nothing), so a matching file was called "425 ms late" and Fix then failed.
+- `fix -o SONG.mid` on `song.mid` overwrote the original on a case-insensitive disk: the guard now uses `samefile` too.
+- Format 2 files read only the first pattern's tempo, so patterns that each start with a tempo aren't "two tempos on one tick" that nothing can fix.
+- A read-only disk (EROFS) or no access (EACCES) gets the "choose a folder" question like a PermissionError.
+- A WAV with 0 channels, under 8 bits or a short `fmt ` block is refused in a sentence.
+- `repair()` keeps `smpte`.
+Also from it: the zip updater refuses an installed Windows copy (mirroring a zip over it would delete the uninstaller) and writes `swap.bat` as Wavelength does, ASCII with every path as an argument, tested on CI's Windows with a "José Pérez" folder; the window clears the last batch when a new one starts, keeps the same file selected after a re-sort, keeps subfolder names when the notes checkbox re-checks, and names a fixed `.rmi` saved elsewhere `.mid`.
+
+File reports say how many markers a file has ("10 markers. Make Ableton Set turns them into AbleSet sections."), counted once even when copied onto several tracks; `--json` has `markers`.
+
 ## How it was trained and broken (2026-10-11)
 
 - Scanned every MIDI file on Matthew's Studio: 17,371 paths, 17,074 readable. The other 297 are genuinely not MIDI (129 empty files, 165 plugin presets named .midi, 3 SMPTE-timed files). No parser bugs.
@@ -106,6 +121,8 @@ Markers become Live locators named the way AbleSet reads them (`> Verse`, the so
 **A bare `>` locator hangs Live while AbleSet loads the set** (full CPU, the set never draws). The same set opened at once in Live 12 Beta, which doesn't load AbleSet, so it's AbleSet's. `has_no_name()` catches `>`, `>>`, `> +LOOP` and the like, and an unnamed marker becomes "> Section N". Reported to AbleSet support on 2026-11-03 (Matthew's thread "AbleSet 3.1.9 with VoiceOver", sent by Faith over iMessage at his OK).
 
 **Reading the file.** The app's own tempo fixes are applied in memory first (a doubled tempo or a REAPER ramp note would put every later locator in the wrong place); `--project` undoes REAPER's padded short bars too. Markers are meta types 6 and 7, REAPER's leading `#` stripped, ramp hints skipped. The song's name is the file name tidied ("Fresh Air - midi track (tempo fixed)" is "Fresh Air"): the sequence name inside real files held a notation app's first staff ("Trumpet in B♭") or an old project's name as often as the song's. Only AbleSet's capitals are commands (`SONG END`, `STOP`, `AUTOSTOP`), so a band's "Stop" stays a section. A last marker named End becomes SONG END. When the music runs past it (Listening Forward rings 13 bars past "end" with the pedal down), SONG END stays at the marker and the tempo map runs to the music's end (`span_beat`), so the next song can't collide with it. Without an end marker, SONG END goes at the end of the bar where the last event (a note-off or a pedal release) falls.
+
+**Reading a set back** (`describe_set`, `midi-tempo ableton --songs`): every song and its sections by bar, both kinds AbleSet uses, locators and Sections-track clips (`section_clips`). Onto a song, the window's preview lists what's there now and will be replaced. Bars are said with `where_text`, which reads a position within a hundredth of a beat before a bar line as that bar (a marker placed by time at 47.9986 is "bar 13", not "bar 12, beat 5"); the maths underneath stays exact.
 
 **Typed markers** (`TypedMarker`, `parse_markers`): `17 Verse`, `17.3 Pickup`, `17:3`, `bar 41 beat 2.5 Hit`, REAPER's `17.3.50` (hundredths of a beat). Beats count in the time signature's own unit, 1 is the downbeat. A beat the bar doesn't have is refused by name. One typed at the same place as a file marker takes its place. With no file, the tempo and time signature are given. Onto a song already in a set with no file, bar 1 is that song's start, counted in the set's own time signatures (`replan_on`). 2,000 typed markers in a test: fine.
 

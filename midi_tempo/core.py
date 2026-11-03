@@ -135,6 +135,8 @@ def read_midi(path: str) -> MidiFile:
         div = smpte * (div & 0xFF)
         if div <= 0:
             raise MidiError("its timing header is corrupt")
+    elif div == 0:
+        raise MidiError("its timing header is corrupt (zero ticks per beat)")
     header = b[: 8 + hlen]
     i = 8 + hlen
     tracks: list[list[Event]] = []
@@ -167,11 +169,19 @@ def read_midi(path: str) -> MidiFile:
                     if run is None:
                         raise MidiError("a track starts with data but no status byte")
                     n = 1 if (run & 0xF0) in (0xC0, 0xD0) else 2
+                    if j + n > len(body):
+                        raise MidiError("the file is cut short or corrupt")
                     events.append(Event(tick, bytes([run]) + body[j : j + n]))
                     j += n
             tracks.append(events)
     except IndexError as e:
         raise MidiError("the file is cut short or corrupt") from e
+    for events in tracks:
+        for e in events:
+            if e.meta_type == TEMPO:
+                d = e.meta_data()
+                if len(d) != 3 or int.from_bytes(d, "big") == 0:
+                    raise MidiError(f"it has a broken tempo event at tick {e.tick}")
     return MidiFile(header, fmt, div, tracks, smpte)
 
 
@@ -201,7 +211,9 @@ def _tempo_list(mf: MidiFile) -> list[tuple[int, float]]:
     if mf.smpte:
         return [(0, 60.0)]
     ev = []
-    for ti, events in enumerate(mf.tracks):
+    # Format 2: every track is its own pattern with its own tempo; the first one's is used, so
+    # patterns that each start with a tempo aren't read as two tempos on one tick.
+    for ti, events in enumerate(mf.tracks[:1] if mf.fmt == 2 else mf.tracks):
         for ei, e in enumerate(events):
             if e.meta_type == TEMPO:
                 ev.append((e.tick, ti, ei, e.bpm()))
@@ -239,7 +251,8 @@ def time_signatures(mf: MidiFile) -> list[tuple[int, int, int]]:
         for e in events:
             if e.meta_type == TIME_SIG:
                 d = e.meta_data()
-                if len(d) >= 2:
+                # A numerator of 0 or a denominator past 64 is corrupt and would make a bar of no length
+                if len(d) >= 2 and d[0] > 0 and d[1] <= 6:
                     out.append((e.tick, d[0], 2 ** d[1]))
     return sorted(out)
 
@@ -251,8 +264,8 @@ def bar_beat(tick: int, division: int, sigs: list[tuple[int, int, int]]) -> str:
         sigs.insert(0, (0, 4, 4))
     bar = 1
     for i, (tk, num, den) in enumerate(sigs):
-        beat_len = int(division * 4 // den)
-        bar_len = num * beat_len
+        beat_len = max(1, int(division * 4 // den))  # a division too coarse for the denominator
+        bar_len = max(1, num * beat_len)
         end = sigs[i + 1][0] if i + 1 < len(sigs) else tick
         span = end - tk
         if i + 1 == len(sigs):
@@ -292,6 +305,7 @@ class Report:
     sigs: list[tuple[int, int, int]] = field(default_factory=list)
     notes: "notes_mod.NoteCounts" = None
     smpte: float | None = None
+    markers: int = 0  # marker and cue point events, the sections Make Ableton Set turns into locators
 
     @property
     def tempo_needs_fix(self) -> bool:
@@ -340,10 +354,14 @@ def analyze(mf: MidiFile, name: str = "") -> Report:
             r.ramps.append(Ramp(run[0][0], run[-1][0], run[0][1], run[-1][1]))
         run = [t] if t[0] is not None else []
     # REAPER ramp notes and misplaced tempo map events
+    seen = set()
     for ti, events in enumerate(mf.tracks):
         for e in events:
             if e.meta_type in (1, 6) and HINT in e.raw:
                 r.hints += 1
+            elif e.meta_type in (6, 7) and (e.tick, e.raw) not in seen:
+                seen.add((e.tick, e.raw))  # the same marker copied onto several tracks counts once
+                r.markers += 1
     r.misplaced = len(_misplaced(mf))
     r.notes = notes_mod.analyze_notes(mf.tracks)
     return r
@@ -423,6 +441,8 @@ def describe(r: Report, notes: bool = True, extra: tuple = ()) -> list[str]:
             f"{n(r.tempo_count, 'tempo event')}, starts at {bpm_text(r.first_bpm)} BPM, "
             f"last note at {r.length_seconds:.1f} seconds."
         )
+    if r.markers:
+        lines.append(f"{n(r.markers, 'marker')}. Make Ableton Set turns them into AbleSet sections.")
     if r.ramps:
         lines.append(f"{n(len(r.ramps), 'tempo ramp')}, written as small steps the way MIDI requires:")
         for rp in r.ramps:
@@ -562,7 +582,7 @@ def repair(mf: MidiFile, notes: bool = True) -> tuple[MidiFile, dict]:
         tracks, c = notes_mod.repair_notes(tracks)
         changed.update(duplicates=c.duplicates, overlaps=c.overlaps, stuck=c.stuck, stray_offs=c.stray_offs)
 
-    return MidiFile(mf.header, mf.fmt, mf.division, tracks), changed
+    return MidiFile(mf.header, mf.fmt, mf.division, tracks, mf.smpte), changed
 
 
 MIDI_EXTENSIONS = (".mid", ".midi", ".smf", ".rmi", ".kar")
@@ -646,7 +666,7 @@ def fix_file(path: str, out: str | None = None, notes: bool = True,
     if padded:
         return _fix_short_bars(path, mf, fixed, changed, project, out, notes)
     out = out or fixed_name(path)
-    if os.path.abspath(out) == os.path.abspath(path):
+    if os.path.abspath(out) == os.path.abspath(path) or (os.path.exists(out) and os.path.samefile(out, path)):
         raise MidiError("refusing to overwrite the original")
     write_midi(out, fixed)
 
@@ -731,7 +751,7 @@ def _fix_short_bars(path, original, cleaned, changed, project, out, notes):
     name = os.path.basename(path)
     retimed, bars = match_project_bars(cleaned, project)
     out = out or fixed_name(path)
-    if os.path.abspath(out) == os.path.abspath(path):
+    if os.path.abspath(out) == os.path.abspath(path) or (os.path.exists(out) and os.path.samefile(out, path)):
         raise MidiError("refusing to overwrite the original")
     write_midi(out, retimed)
 
@@ -839,7 +859,7 @@ def rpp_beat_at_seconds(pts: list[tuple[float, float, int]], t: float) -> float:
         end = bpm if (last or shape != 0) else pts[i + 1][1]
         if t <= t1 + 1e-9 or last:
             dt = t - t0
-            now = bpm + (end - bpm) * dt / (t1 - t0) if end != bpm else bpm
+            now = bpm + (end - bpm) * dt / (t1 - t0) if end != bpm and t1 > t0 else bpm
             return beat + dt * (bpm + now) / 120
         beat += (t1 - t0) * (bpm + end) / 120
     return beat
@@ -899,8 +919,10 @@ def export_has_short_bar_fault(mf: MidiFile, bars: list[ShortBar]) -> bool:
     def near(x):
         return any(abs(t - x) <= 2 for t in ticks)
 
-    return all(near((b.beat + b.shift) * mf.division) and not near(b.beat * mf.division) for b in bars
-               if b.beat * mf.division <= (ticks[-1] if ticks else 0))
+    inside = [b for b in bars if b.beat * mf.division <= (ticks[-1] if ticks else 0)]
+    # all() of nothing is True: with no short bar inside the tempo map there's nothing to say
+    return bool(inside) and all(near((b.beat + b.shift) * mf.division) and not near(b.beat * mf.division)
+                                for b in inside)
 
 
 def match_project_bars(mf: MidiFile, rpp: str) -> tuple[MidiFile, list[ShortBar]]:

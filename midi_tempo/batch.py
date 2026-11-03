@@ -11,6 +11,7 @@ called first (app.py does).
 from __future__ import annotations
 
 import multiprocessing as mp
+import errno
 import os
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -32,6 +33,8 @@ def _check_one(job: tuple[str, str]):
         return path, analyze(read_midi(path), name), None
     except (MidiError, OSError) as e:
         return path, None, f"{name}: could not check it, {e}."
+    except Exception as e:  # noqa: BLE001 - one strange file must never end the whole batch
+        return path, None, f"{name}: could not check it, something in it is malformed ({e.__class__.__name__})."
 
 
 def _fix_one(job: tuple):
@@ -41,8 +44,15 @@ def _fix_one(job: tuple):
         return path, out, said, None
     except PermissionError as e:
         return path, None, None, str(e)
-    except (MidiError, OSError) as e:
+    except OSError as e:
+        if e.errno in (errno.EROFS, errno.EACCES):  # a read-only disk or share: ask where to save instead
+            return path, None, None, str(e)
         return path, None, [f"{os.path.basename(path)}: not fixed, {e}."], None
+    except MidiError as e:
+        return path, None, [f"{os.path.basename(path)}: not fixed, {e}."], None
+    except Exception as e:  # noqa: BLE001
+        return path, None, [f"{os.path.basename(path)}: not fixed, something in it is malformed "
+                            f"({e.__class__.__name__})."], None
 
 
 def _run(func, jobs: list, workers: int | None, progress: Callable[[int, int], None] | None,

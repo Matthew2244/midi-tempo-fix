@@ -478,3 +478,42 @@ def test_stop_ends_a_batch_early(tmp_path):
     res, stopped = check_many([(p, p) for p in paths], workers=1, progress=lambda i, t: seen.append(i),
                               stop=lambda: len(seen) >= 5)
     assert stopped and len(res) == 5
+
+
+def test_a_corrupt_file_never_ends_a_batch(tmp_path):
+    from midi_tempo.batch import check_many
+    good = tmp_path / "good.mid"
+    good.write_bytes(smf([track([(0, tempo(120))] + notes(8))]))
+    cut = tmp_path / "cut.mid"
+    body = b"\x00\x90\x3c"  # a note-on cut off before its velocity
+    cut.write_bytes(b"MThd" + struct.pack(">IHHH", 6, 0, 1, PPQ) + b"MTrk" + struct.pack(">I", len(body)) + body)
+    zero = tmp_path / "zero tempo.mid"
+    zero.write_bytes(smf([track([(0, b"\xff\x51\x03\x00\x00\x00")] + notes(4))]))
+    results, _ = check_many([(str(p), p.name) for p in (good, cut, zero)], workers=1)
+    assert results[0][1] is not None
+    assert all(r[1] is None and "could not check" in r[2] for r in results[1:])
+
+
+def test_a_zero_length_time_signature_is_ignored(tmp_path):
+    p = tmp_path / "ts0.mid"
+    p.write_bytes(smf([track([(0, tempo(120)), (0, timesig(0, 2)), (PPQ, tempo(90)), (PPQ, tempo(100))]
+                             + notes(8))]))
+    describe(analyze(read_midi(str(p)), "ts0.mid"))  # used to divide by zero
+
+
+def test_fix_never_writes_over_the_original_by_another_spelling(tmp_path):
+    p = tmp_path / "song.mid"
+    p.write_bytes(smf([track([(0, tempo(120)), (0, tempo(90))] + notes(8))]))
+    before = p.read_bytes()
+    other = tmp_path / "SONG.mid"
+    if not other.exists():  # a case-sensitive disk: a different file, and nothing to prove here
+        return
+    with pytest.raises(MidiError, match="overwrite"):
+        fix_file(str(p), out=str(other))
+    assert p.read_bytes() == before
+
+
+def test_format_2_patterns_each_with_a_tempo_are_clean(tmp_path):
+    p = tmp_path / "fmt2.mid"
+    p.write_bytes(smf([track([(0, tempo(120))] + notes(4)), track([(0, tempo(90))] + notes(4))], fmt=2))
+    assert not analyze(read_midi(str(p)), "fmt2.mid").tempo_needs_fix

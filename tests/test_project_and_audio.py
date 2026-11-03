@@ -3,6 +3,7 @@ import math
 import random
 import re
 import struct
+import sys
 
 import pytest
 
@@ -159,3 +160,23 @@ def test_check_with_the_project_says_needs_fixing(tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.startswith("song.mid: needs fixing.") and "short bar whole" in out
     assert "To fix: midi-tempo fix" in out
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the swap script is Windows-only")
+def test_windows_swap_script_with_an_accented_path(tmp_path):
+    """The zip updater's swap.bat must take paths like C:\\Users\\José whole (cmd reads the script in
+    the OEM code page, so paths go in as arguments) and mirror the new app over the old one."""
+    import subprocess
+    from midi_tempo import update
+    base = tmp_path / "José Pérez"
+    new_app, target, work = base / "new", base / "MIDI Tempo Fix", base / "work"
+    for d in (new_app, target, work):
+        d.mkdir(parents=True)
+    (new_app / "MIDI Tempo Fix.exe").write_text("new")
+    (target / "MIDI Tempo Fix.exe").write_text("old")
+    (target / "gone.txt").write_text("only in the old version")
+    _, command = update.windows_swap(str(work), 999999, str(new_app), str(target), relaunch=False)
+    subprocess.run(command, timeout=120)
+    assert (target / "MIDI Tempo Fix.exe").read_text() == "new"
+    assert not (target / "gone.txt").exists()
+    assert not work.exists()
