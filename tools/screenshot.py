@@ -7,6 +7,7 @@ prompt. The window is shown transparent and off-screen without activating, becau
 macOS paints nothing in a window that was never shown.
 """
 import sys, os, time, ctypes, ctypes.util, pathlib
+os.environ["MIDI_TEMPO_FIX_CONFIG"] = "MIDI Tempo Fix (screenshot)"  # never the real settings
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path[:0] = [ROOT, os.path.join(ROOT, "tests")]
 import test_project_and_audio as T

@@ -43,6 +43,8 @@ INTRO = (
 DAY = 24 * 3600
 BRIEF_OVER = 20  # more files than this: list only what needs fixing, so the report stays listenable
 HELP_URL = "https://github.com/Matthew2244/midi-tempo-fix#readme"
+# Tests and the screenshot tool set this so they never change a real user's settings
+CONFIG_NAME = os.environ.get("MIDI_TEMPO_FIX_CONFIG") or APP_NAME
 
 
 def mac_accessibility_label(ctrl: wx.Window, label: str) -> None:
@@ -206,7 +208,7 @@ class MainFrame(wx.Frame):
         self.choose_dir = wx.Button(panel, label="Choose a f&older...")
         self.choose_dir.SetToolTip("Checks every MIDI file in a folder, including folders inside it.")
         self.notes = wx.CheckBox(panel, label="Also check and fix &notes: duplicates, overlaps, stuck notes")
-        self.cfg = wx.Config(APP_NAME)
+        self.cfg = wx.Config(CONFIG_NAME)
         self.notes.SetValue(self.cfg.ReadBool("check_notes", True))  # remembered between runs
         self.notes.SetToolTip("When off, only the tempo map is checked and fixed, and notes are left exactly as they are.")
 
@@ -910,7 +912,7 @@ class MainFrame(wx.Frame):
 
     def quiet_update_check(self):
         """Once a day, ask GitHub if there is a newer version; say so only if there is."""
-        cfg = wx.Config(APP_NAME)
+        cfg = wx.Config(CONFIG_NAME)
         if time.time() - cfg.ReadFloat("last_update_check", 0) < DAY:
             return
         cfg.WriteFloat("last_update_check", time.time())
