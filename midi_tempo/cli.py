@@ -7,6 +7,12 @@
     midi-tempo check FOLDER --brief -r         one line per file, folders within folders too
     midi-tempo fix FILE.mid [FILE.mid ...]     save a cleaned copy next to each original
     midi-tempo fix A.mid --project X.RPP       ... also undo REAPER's padded short bars
+    midi-tempo ableton song.mid                a new Live set: one locator per marker, for AbleSet
+    midi-tempo ableton song.mid --into Show.als              ... added after the last song in a set
+    midi-tempo ableton song.mid --into Show.als --onto Song  ... onto a song already there
+    midi-tempo ableton song.mid --marker "17 Verse" --marker "33.3 Hit"   ... plus markers typed in
+    midi-tempo ableton --name Song --tempo 96 --markers list.txt         ... or typed in alone
+    midi-tempo ableton --songs Show.als        list the songs in a set
 
 Checks the tempo map (doubled tempos, REAPER ramp notes, tempo on the wrong
 track) and the notes (duplicates, overlaps, stuck notes, stray releases).
@@ -125,6 +131,91 @@ def cmd_fix(a) -> int:
     return status
 
 
+def cmd_ableton(a) -> int:
+    from . import ableton as A
+
+    try:
+        if a.songs:
+            ls = A.LiveSet.load(a.songs)
+            songs = A.set_songs(ls)
+            if not songs:
+                print(f"{os.path.basename(a.songs)} has no songs yet: no locators AbleSet reads as songs.")
+                return 0
+            sigs = ls.sigs()
+            lines = [f"{os.path.basename(a.songs)}: {len(songs)} song{'s' if len(songs) != 1 else ''}."]
+            for s, _ in songs:
+                bar, _beat = A.bar_number(sigs, s.beat)
+                lines.append(f"Bar {bar}: {A.song_title(s.name)}" + ("" if A.song_title(s.name) == s.name
+                                                                     else f" (locator: {s.name})"))
+            print("\n".join(lines))
+            return 0
+        typed = []
+        if a.markers:
+            text = sys.stdin.read() if a.markers == "-" else open(a.markers, encoding="utf-8-sig").read()
+            typed += A.parse_markers(text)
+        for m in a.marker or []:
+            typed += A.parse_markers(m)
+        files = midi_files(a.files) if a.files else []
+        if a.files and not files:
+            print("No MIDI files found there.")
+            return 2
+        if typed and len(files) > 1:
+            print("Typed markers go with one song at a time; give one MIDI file, or none.")
+            return 2
+        if not files and not typed:
+            print("Give a MIDI file, or type markers with --marker or --markers.")
+            return 2
+        sig = None
+        if a.time:
+            try:
+                num, den = (int(x) for x in a.time.split("/"))
+                sig = (num, den)
+            except ValueError:
+                print("Write the time signature like 4/4 or 6/8.")
+                return 2
+        opts = dict(quick=a.quick, song_end=not a.no_song_end, plain=a.plain)
+        if files:
+            if a.name and len(files) > 1:
+                print("--name names one song; with several files each takes its file's name.")
+                return 2
+            plans = [A.plan_song(f, a.name, project=a.project, typed=typed, file_markers=not a.no_file_markers,
+                                 **opts) for f in files]
+        else:
+            if not a.name and not a.onto:
+                print("Name the song with --name.")
+                return 2
+            plans = [A.plan_song(None, a.name or a.onto, typed=typed, tempo=a.tempo, signature=sig, **opts)]
+        if a.preview:
+            out = []
+            for p in plans:
+                out += A.describe_plan(p) + [""]
+            print("\n".join(out).rstrip())
+            return 0
+        results = []
+        if a.into:
+            results.append(A.add_to_set(a.into, plans, out=a.output, onto=a.onto, line_up=a.line_up,
+                                        in_place=a.update_set))
+        elif a.each:
+            for p in plans:
+                results.append(A.new_set([p], A.default_new_set_path(p), a.template))
+        else:
+            out = a.output or (A.default_new_set_path(plans[0]) if len(plans) == 1 else os.path.join(
+                os.path.dirname(os.path.abspath(files[0])), "Set Project", "Set.als"))
+            results.append(A.new_set(plans, out, a.template))
+    except A.NeedsLineUp as e:
+        print(f"{e} Run it again with --line-up bars or --line-up time.")
+        return 1
+    except (A.SetError, MidiError, OSError) as e:
+        msg = str(e)
+        print("Not saved: " + msg[0].lower() + msg[1:] + ("" if msg.endswith(".") else "."))
+        return 2
+    lines = []
+    for r in results:
+        lines += A.describe_result(r) + [f"Saved at {r.path}", ""]
+    print("\n".join(lines).rstrip())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="midi-tempo",
@@ -156,7 +247,50 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--tempo-only", action="store_true", help="Fix the tempo map only and leave the notes alone.")
     f.add_argument("-r", "--recursive", action="store_true", help="Also look inside folders within folders.")
     f.add_argument("-j", "--jobs", type=int, default=None, help="How many processor cores to use.")
+    ab = sub.add_parser(
+        "ableton", help="Make an Ableton Live set with a locator for each marker, named for AbleSet.",
+        description="Turns markers into Ableton Live locators named the way AbleSet reads them: the song's name "
+                    "at bar 1, \"> Verse\" for each section, and SONG END. The MIDI file's tempo map and time "
+                    "signatures come too, so Live's bars match the song's. Markers can also be typed in, as many "
+                    "as you like. Your files are never changed: a new set is saved, or a copy of yours.")
+    ab.add_argument("files", nargs="*", help="MIDI files. Several make one set with the songs back to back.")
+    ab.add_argument("--marker", action="append", metavar='"BAR[.BEAT] NAME"',
+                    help='A marker typed in, like "17 Verse" or "33.3 Pickup" (bar 33, beat 3). Repeat it for more.')
+    ab.add_argument("--markers", metavar="FILE",
+                    help="A text file of markers, one per line, like 17 Verse. A dash reads them from the keyboard "
+                         "or a pipe.")
+    ab.add_argument("--no-file-markers", action="store_true",
+                    help="Leave out the MIDI file's own markers and use only the typed ones.")
+    ab.add_argument("--name", help="The song's name. Default: the MIDI file's name.")
+    ab.add_argument("--tempo", type=float, help="With no MIDI file: the song's tempo in BPM. Default 120.")
+    ab.add_argument("--time", metavar="4/4", help="With no MIDI file: the time signature. Default 4/4.")
+    ab.add_argument("--into", metavar="SET.als",
+                    help="Add to a set you already have instead of making a new one. A copy is saved next to it, "
+                         "named (markers added).")
+    ab.add_argument("--onto", metavar="SONG",
+                    help="With --into: put the markers on this song, already in the set, replacing its section "
+                         "locators and keeping its tempo. Without it, the song goes after the last one.")
+    ab.add_argument("--line-up", choices=("bars", "time"),
+                    help="With --onto, when the set's tempo isn't the file's: bars follows the set's tempo (a set "
+                         "sped up or slowed down on purpose); time keeps each marker at its moment (stems that "
+                         "aren't warped).")
+    ab.add_argument("--update-set", action="store_true",
+                    help="With --into: change the set itself, keeping the old one as (before markers).")
+    ab.add_argument("--songs", metavar="SET.als", help="List the songs in a set, to pick one for --onto.")
+    ab.add_argument("--each", action="store_true", help="One set per MIDI file, for AbleSet's multi-file projects.")
+    ab.add_argument("--template", metavar="SET.als",
+                    help="A set to start new sets from. Default: the empty set inside your installed Live.")
+    ab.add_argument("--quick", action="store_true", help='Make every section a quick-jump section (">>").')
+    ab.add_argument("--plain", action="store_true",
+                    help="Name locators exactly as the markers, for Live without AbleSet: no song name, no SONG END.")
+    ab.add_argument("--no-song-end", action="store_true", help="Don't add a SONG END locator.")
+    ab.add_argument("--project", metavar="X.RPP",
+                    help="The REAPER project the MIDI file came from, to undo REAPER's padded short bars first.")
+    ab.add_argument("--preview", action="store_true", help="Say what the set would hold, and save nothing.")
+    ab.add_argument("-o", "--output", metavar="SET.als", help="Where to save the set.")
     a = p.parse_args(argv)
+    if a.cmd == "ableton":
+        return cmd_ableton(a)
     return cmd_check(a) if a.cmd == "check" else cmd_fix(a)
 
 

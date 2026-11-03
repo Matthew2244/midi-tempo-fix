@@ -4,7 +4,8 @@ Built on wxPython because it draws the platform's own controls, so VoiceOver,
 NVDA, JAWS and Narrator read every button, field and menu natively.
 
 Layout, in tab order: what this does, Choose MIDI files, the report, Fix and
-save cleaned copies, Show cleaned files, Compare with another file. After any action, focus
+save cleaned copies, Show cleaned files, Compare with another file, Make
+Ableton Set (ableton_gui.py). After any action, focus
 goes to the report so a screen reader reads the result straight away.
 """
 from __future__ import annotations
@@ -67,13 +68,26 @@ def mac_accessibility_label(ctrl: wx.Window, label: str) -> None:
 
         text = send(objc.objc_getClass(b"NSString"), "stringWithUTF8String:",
                     label.encode(), argtypes=(ctypes.c_char_p,))
+        def responds(obj, sel):
+            return send(obj, "respondsToSelector:", objc.sel_registerName(sel.encode()),
+                        restype=ctypes.c_bool, argtypes=(ctypes.c_void_p,))
+
         view = ctrl.GetHandle()
         targets = [view]
-        if send(view, "respondsToSelector:", objc.sel_registerName(b"documentView"),
-                restype=ctypes.c_bool, argtypes=(ctypes.c_void_p,)):
+        if responds(view, "documentView"):
             doc = send(view, "documentView")
             if doc:
                 targets.append(doc)
+        # A spin control is a plain view around a text field and a stepper: name the parts too
+        subs = send(view, "subviews")
+        for i in range(send(subs, "count", restype=ctypes.c_ulong) if subs else 0):
+            targets.append(send(subs, "objectAtIndex:", i, argtypes=(ctypes.c_ulong,)))
+        # A text field or popup's spoken element is its cell, not the control around it
+        for t in list(targets):
+            if responds(t, "cell"):
+                cell = send(t, "cell")
+                if cell:
+                    targets.append(cell)
         for t in targets:
             send(t, "setAccessibilityLabel:", text, restype=None, argtypes=(ctypes.c_void_p,))
     except Exception:
@@ -194,6 +208,11 @@ class MainFrame(wx.Frame):
             "Compares timing with another MIDI file of the same music from any app, a REAPER project, or a "
             "recording (WAV, AIFF, MP3 and more). Shows whether anything moved, where, and why."
         )
+        self.ableton = wx.Button(panel, label="Make &Ableton Set...")
+        self.ableton.SetToolTip(
+            "Makes an Ableton Live set with a locator at every marker, named for AbleSet, with the song's tempo "
+            "and time signatures. Markers can come from the file or be typed in, at any bar and beat."
+        )
         self.fix.Disable()
         self.compare.Disable()
         self.show_saved.Disable()
@@ -210,6 +229,7 @@ class MainFrame(wx.Frame):
         buttons.Add(self.fix, 0, wx.RIGHT, 8)
         buttons.Add(self.show_saved, 0, wx.RIGHT, 8)
         buttons.Add(self.compare, 0, wx.RIGHT, 8)
+        buttons.Add(self.ableton, 0, wx.RIGHT, 8)
         buttons.Add(self.stop_btn, 0, wx.RIGHT, 8)
         buttons.Add(self.gauge, 1, wx.ALIGN_CENTER_VERTICAL)
 
@@ -242,6 +262,8 @@ class MainFrame(wx.Frame):
         self.choose.Bind(wx.EVT_BUTTON, self.on_choose)
         self.fix.Bind(wx.EVT_BUTTON, self.on_fix)
         self.compare.Bind(wx.EVT_BUTTON, self.on_compare)
+        self.ableton.Bind(wx.EVT_BUTTON, self.on_ableton)
+        self.ableton_sets: list[str] = []
         self.show_saved.Bind(wx.EVT_BUTTON, lambda e: reveal(self.saved))
         self.notes.Bind(wx.EVT_CHECKBOX, self.on_notes_toggled)
         self.files, self.fixable, self.saved = [], [], []
@@ -260,6 +282,8 @@ class MainFrame(wx.Frame):
         m_fix = f.Append(wx.ID_SAVE, "&Fix and save cleaned copies\tCtrl+S")
         m_show = f.Append(wx.ID_ANY, "S&how cleaned files\tCtrl+Shift+S")
         m_cmp = f.Append(wx.ID_ANY, "Com&pare with another file...\tCtrl+R")
+        m_abl = f.Append(wx.ID_ANY, "Make &Ableton Set...\tCtrl+L")
+        m_abl_show = f.Append(wx.ID_ANY, "Show the Last Ableton Set\tCtrl+Shift+L")
         f.AppendSeparator()
         m_save_rep = f.Append(wx.ID_ANY, "Save &report as text...")
         f.AppendSeparator()
@@ -290,6 +314,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_choose, m_open)
         self.Bind(wx.EVT_MENU, self.on_fix, m_fix)
         self.Bind(wx.EVT_MENU, self.on_compare, m_cmp)
+        self.Bind(wx.EVT_MENU, self.on_ableton, m_abl)
+        self.Bind(wx.EVT_MENU, self.on_show_ableton, m_abl_show)
         self.Bind(wx.EVT_MENU, lambda e: reveal(self.saved), m_show)
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), m_quit)
         self.Bind(wx.EVT_MENU, self.on_about, m_about)
@@ -440,6 +466,37 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
+    def on_ableton(self, _=None):
+        """Markers to Live locators. Starts from the file selected in the Files list, else the files checked."""
+        if self.busy:
+            return
+        from .ableton_gui import AbletonDialog
+        from . import ableton as A
+
+        files = list(self.files)
+        i = self.list.GetSelection()
+        if 0 <= i < len(self.entries) and self.entries[i][1] is not None:
+            first = self.entries[i][0]
+            files = [first] + [f for f in files if f != first]
+        with AbletonDialog(self, files) as d:
+            if d.ShowModal() != wx.ID_OK or not d.result:
+                self.SetFocus()
+                return
+            results = d.result
+        lines = []
+        for r in results:
+            lines += A.describe_result(r) + [""]
+        lines.append("File, Show the Last Ableton Set (Ctrl-Shift-L) shows it in the "
+                     + ("Finder." if sys.platform == "darwin" else "folder."))
+        self.ableton_sets = [r.path for r in results]
+        self.show(lines)
+
+    def on_show_ableton(self, _=None):
+        if self.ableton_sets:
+            reveal(self.ableton_sets)
+        else:
+            self.tell("No Ableton set made yet.")
+
     def tell(self, text: str):
         """A short confirmation: spoken by VoiceOver, shown in the status bar."""
         self.SetStatusText(text)
@@ -540,13 +597,13 @@ class MainFrame(wx.Frame):
         self.stopping = False
         if busy:
             self.SetStatusText("")
-            for c in (self.choose, self.choose_dir, self.notes, self.fix, self.compare, self.show_saved):
+            for c in (self.choose, self.choose_dir, self.notes, self.fix, self.compare, self.show_saved, self.ableton):
                 c.Disable()
             self.stop_btn.Enable()
             self.gauge.SetValue(0)
             self.gauge.Show()
         else:
-            for c in (self.choose, self.choose_dir, self.notes):
+            for c in (self.choose, self.choose_dir, self.notes, self.ableton):
                 c.Enable()
             self.stop_btn.Disable()
             self.gauge.Hide()
