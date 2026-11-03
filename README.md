@@ -46,6 +46,19 @@ It follows the harmony first, so it can track a recording that wanders a long wa
 
 You can also compare against a REAPER project (.rpp), which reads the project's tempo map directly. That confirms an export matches the session it came from, and catches the bar REAPER's export made whole. After that comparison, **Fix and save cleaned copies** moves everything back to where the project plays it.
 
+## Ableton Live sets for AbleSet
+
+Write the song anywhere, put markers where the sections start, and export MIDI. **Make Ableton Set** (Command-L or Control-L) turns it into a Live set with a locator at every marker, named the way [AbleSet](https://ableset.com) reads them: the song's name at bar 1, "> Verse" for each section, and SONG END where it stops. The file's tempo map and time signatures come too, so Live's bars land where the song's do.
+
+- **Markers from the file, typed in, or both.** Every marker is listed by bar and beat ("Bar 33, beat 3: Pickup"). Add as many more as you like: type the bar, the beat and the name, then press Return, and you're back on Bar for the next one. **Type Several** takes a whole list at once, one per line, like `17 Verse` or `33.3 Pickup`. No MIDI file at all works too: give the tempo and time signature and type the markers.
+- **A new set, or one you already have.** A new set starts from the empty set inside your installed Live. Several MIDI files make one set with the songs back to back, or one set each for AbleSet's multi-file projects. In a set you already have, a song goes after the last one with its tempo map, or onto a song already there, replacing that song's section locators and leaving its tempo alone. When the set's tempo and the file's disagree, you choose how the markers line up: by bar (the set is sped up or slowed down on purpose) or by time (stems that aren't warped).
+- **Your files are never changed.** A set you already have is saved as a copy named "(markers added)" unless you choose to update it, and then the old one is kept as "(before markers)". Every set is read back and checked before it's kept: each locator where it should be, and with the tempo map written, each one playing at its marker's moment to the millisecond.
+- **What the set will hold** shows every locator, by bar and beat, before anything is saved.
+
+Markers can carry AbleSet's own notation straight from your DAW: "> Chorus +LOOP", "SONG END", "* note to self" all go through as written. Only AbleSet's capitals count as commands, so a section your band calls "Stop" stays a section and never stops the show. A marker called End, as the last marker, becomes SONG END. From REAPER, export with File, Export project MIDI, and set "Export project markers as MIDI" to markers.
+
+For Live on its own, **Locator names** can be just the marker names, with no song name and no SONG END.
+
 ## Download
 
 Get the latest version from the [Releases page](../../releases):
@@ -54,7 +67,7 @@ Get the latest version from the [Releases page](../../releases):
 
   The download is built for Apple silicon Macs. On an Intel Mac, install the command line version below and run `midi-tempo-fix` to open the app.
 
-- **Windows:** MIDI-Tempo-Fix-windows.zip. Unzip it anywhere and run MIDI Tempo Fix.exe inside the folder. If SmartScreen warns you, choose More info, then Run anyway.
+- **Windows:** MIDI-Tempo-Fix-Setup.exe installs it for you alone, with no administrator password, a Start menu entry, and an entry in Settings, Apps to uninstall it. Installed copies update themselves. Or take MIDI-Tempo-Fix-windows.zip, unzip it anywhere and run MIDI Tempo Fix.exe inside the folder. If SmartScreen warns you, choose More info, then Run anyway.
 
 ## Using the app
 
@@ -63,7 +76,8 @@ Get the latest version from the [Releases page](../../releases):
 3. The report starts with the answer: each file is either "clean" or "needs fixing", with the problems named. The details follow. With more than one file, a summary line comes first ("Checked 40 files: 3 need fixing, 37 clean"). With more than 20, only the files that need fixing are listed, so the report stays short enough to listen to. Focus moves to the report, so your screen reader reads it right away. Big folders are checked in the background on every processor core (a 5,000-file library takes about four seconds on a recent Mac), with a progress bar, progress in the title bar, and the count spoken now and then. **Stop** (or Escape) ends a batch early and keeps the results so far.
 4. If something needs fixing, press **Fix and save cleaned copies** (Command-S or Control-S). The report says where each copy went, and **Show cleaned files** (Command-Shift-S or Control-Shift-S) opens that folder with them selected.
 5. **Compare with another file** (Command-R or Control-R) compares the chosen files with a recording, any other MIDI file, or a REAPER project. A recording takes a few seconds per file; the window says so while it listens, and Escape stops.
-6. **Copy report** (Command-Shift-C or Control-Shift-C) puts the whole report on the clipboard, ready to paste into a message. **File, Save report as text** saves it as a file. **Help, MIDI Tempo Fix Help** opens this page.
+6. **Make Ableton Set** (Command-L or Control-L) makes a Live set from the selected file's markers, or markers you type in. See above. **File, Show the Last Ableton Set** (Command-Shift-L or Control-Shift-L) shows the set it saved.
+7. **Copy report** (Command-Shift-C or Control-Shift-C) puts the whole report on the clipboard, ready to paste into a message. **File, Save report as text** saves it as a file. **Help, MIDI Tempo Fix Help** opens this page.
 
 **Bigger text:** View, Bigger Text (Command-equals or Control-equals) makes the list, report, labels and checkbox larger; Smaller Text and Actual Size undo it. The size is remembered. Verdicts and summaries are bold, so the answer stands out by weight as well as by words; nothing relies on colour.
 
@@ -71,7 +85,7 @@ When a long batch finishes, the app plays a sound and bounces its Dock icon, in 
 
 The app remembers whether notes are checked, your text size, and which folder you last chose files from.
 
-**Updates:** once a day the app asks GitHub whether there's a newer version, and the report says so if there is. **Help, Check for Updates** downloads it, checks that it starts, and replaces the app you have. Nothing else is sent anywhere.
+**Updates:** once a day the app asks GitHub whether there's a newer version, and the title bar and the report say so if there is. Nothing pops up. **Help, Check for Updates** opens the update window, with what's new and Install. On a Mac and in an installed Windows copy that's Sparkle (WinSparkle on Windows), and every update is signed, so a copy only installs what was really released here. A Windows copy run from the zip downloads the new version, checks that it starts, and replaces itself. Nothing else is sent anywhere.
 
 ## Command line
 
@@ -93,7 +107,16 @@ midi-tempo fix export.mid --project "My Song.RPP"
 midi-tempo fix song.mid
 midi-tempo fix "Exports folder"
 midi-tempo fix --tempo-only song.mid
+midi-tempo ableton song.mid
+midi-tempo ableton song.mid --marker "17 Verse" --marker "33.3 Pickup"
+midi-tempo ableton song.mid --into "Show.als"
+midi-tempo ableton --songs "Show.als"
+midi-tempo ableton song.mid --into "Show.als" --onto "Song Name" --line-up bars
+midi-tempo ableton --name "New Song" --tempo 96 --time 6/8 --markers markers.txt
+midi-tempo ableton *.mid --each
 ```
+
+`ableton` makes a Live set from markers: `--marker` adds typed ones, `--markers` reads a list from a file, `--into` adds to a set you have (a copy is saved), `--onto` puts the markers on a song already there, `--songs` lists a set's songs, `--each` makes one set per file, `--plain` names locators for Live without AbleSet, and `--preview` says what the set would hold without saving anything.
 
 Both commands use every processor core but one; `--jobs 1` keeps it to one. `--json` prints the results in a form scripts and other tools can read. `check` starts each file with its verdict, and puts a summary line first when there's more than one. `--brief` gives one line per file. `-r` also looks inside folders within folders. `check` changes nothing. It exits with 0 when files are clean, 1 when something needs fixing, and 2 when a file can't be read. `fix` takes files or folders and saves a cleaned copy of each file that needs one. The command line needs nothing beyond Python itself, except checking against a recording, which needs numpy (`pip install numpy`). The app includes it. Recordings other than WAV are converted with afconvert on a Mac, or ffmpeg if it's installed. To open the app from a pip install, add the app extra (`pip install "midi-tempo-fix[app] @ git+https://github.com/Matthew2244/midi-tempo-fix"`) and run `midi-tempo-fix`.
 

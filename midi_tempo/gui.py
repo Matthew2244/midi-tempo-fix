@@ -19,7 +19,7 @@ import wx
 import threading
 import time
 
-from . import __version__, update
+from . import __version__, sparkle, update, winsparkle
 from .batch import check_many, fix_many
 import webbrowser
 
@@ -879,6 +879,11 @@ class MainFrame(wx.Frame):
             self.report.AppendText(f"\n\n{line}")
 
     def on_check_updates(self, _):
+        # A copy with Sparkle (the Mac app) or an installed Windows copy (WinSparkle) gets that
+        # updater's own window: every update signed, release notes, Skip This Version.
+        if sparkle.check() or (winsparkle.installed() and winsparkle.check()):
+            self.tell(f"Checking for updates. You have {update.current_version()}.")
+            return
         self.show([f"Checking for a newer version. You have {update.current_version()}."])
         wx.Yield()
         info = update.latest()
@@ -930,10 +935,17 @@ class App(wx.App):
         self.SetAppName(APP_NAME)
         self.frame = MainFrame()
         self.frame.Show()
+        sparkle.start()  # loaded now so Help, Check for Updates answers at once; it never checks by itself
+        if winsparkle.installed():
+            winsparkle.start(lambda: wx.CallAfter(self.frame.Close))
         files = [a for a in sys.argv[1:] if not a.startswith("-")]
         if files:
             self.frame.check(files)
         return True
+
+    def OnExit(self):
+        winsparkle.cleanup()
+        return 0
 
     def MacOpenFiles(self, filenames):  # files dropped on the Dock icon or opened with the app
         self.frame.check(list(filenames))
@@ -983,6 +995,15 @@ def main():
             audio_ok = False
         status = "OK" if ok and audio_ok else ("PARALLEL FAILED" if not ok else "AUDIO CHECK MISSING")
         ok = ok and audio_ok
+        # The Mac app must carry Sparkle, or no copy of this version could ever update again
+        if ok and sys.platform == "darwin" and getattr(sys, "frozen", False) and not sparkle.load():
+            ok, status = False, "SPARKLE MISSING"
+        if ok and sys.platform == "win32" and getattr(sys, "frozen", False) and winsparkle.load() is None:
+            ok, status = False, "WINSPARKLE MISSING"
+        try:  # the Ableton set maker, which the window opens on demand
+            from . import ableton_gui  # noqa: F401
+        except Exception:
+            ok, status = False, "ABLETON WINDOW MISSING"
         print(f"{APP_NAME} {__version__} {status}, wxPython {wx.version()}")
         if not ok:
             sys.exit(1)
