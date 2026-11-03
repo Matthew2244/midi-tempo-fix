@@ -38,6 +38,9 @@ def embed_sparkle(app: str, sign_id: str | None) -> None:
     subprocess.run(["ditto", os.path.join(sparkle_dir(), "Sparkle.framework"), dest], check=True)
     # The XPC services are for sandboxed apps; this one isn't, so they're left out.
     shutil.rmtree(os.path.join(dest, "Versions", "B", "XPCServices"), ignore_errors=True)
+    link = os.path.join(dest, "XPCServices")  # the top-level link to them would point at nothing
+    if os.path.islink(link):
+        os.remove(link)
     sign = ["codesign", "--force", "--sign", sign_id or "-"]
     if sign_id:
         sign += ["--options", "runtime", "--timestamp"]
