@@ -199,6 +199,18 @@ def cmd_ableton(a) -> int:
                 return 2
             plans = [A.plan_song(None, a.name or a.onto, typed=typed, tempo=a.tempo, signature=sig,
                                  lyrics=lyrics if isinstance(lyrics, list) else None, **opts)]
+        if a.save_midi:
+            if len(files) != 1 or A.is_rpp(files[0]):
+                print("--save-midi writes markers into a copy of one MIDI file; give exactly one.")
+                return 2
+            items = [] if a.no_file_markers else A.file_markers_typed(files[0], a.project)[0]
+            for m in typed:  # a typed marker at the same place takes the file's one's place
+                items = [x for x in items if not (x.bar == m.bar and abs(x.beat - m.beat) < 1e-6)] + [m]
+            items.sort(key=lambda m: (m.bar, m.beat))
+            said = A.save_markers_midi(files[0], items, a.save_midi, a.project)
+            print("\n".join(said + [f"Saved {A.n(len(items), 'marker')} in {a.save_midi}. "
+                                     f"{os.path.basename(files[0])} wasn't changed."]))
+            return 0
         if a.preview:
             out = []
             for p in plans:
@@ -309,6 +321,9 @@ def main(argv: list[str] | None = None) -> int:
     ab.add_argument("--project", metavar="X.RPP",
                     help="The REAPER project the MIDI file came from, to undo REAPER's padded short bars first.")
     ab.add_argument("--preview", action="store_true", help="Say what the set would hold, and save nothing.")
+    ab.add_argument("--save-midi", metavar="COPY.mid",
+                    help="Instead of a set, save a copy of the MIDI file with its markers and the typed ones "
+                         "(--marker, --markers), so other apps get them. The file itself is never changed.")
     ab.add_argument("-o", "--output", metavar="SET.als", help="Where to save the set.")
     a = p.parse_args(argv)
     if a.cmd == "ableton":

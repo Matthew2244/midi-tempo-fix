@@ -24,15 +24,17 @@ from . import __version__, sparkle, update, winsparkle
 from .batch import check_many, fix_many
 import webbrowser
 
-from .core import (PROJECT_PROBLEM, MidiError, analyze, compare_with, describe, fix_file, fixed_name, midi_files,
-                   needs_project_fix, problems, read_midi, summary, verdict)
+from .core import (MIDI_EXTENSIONS, PROJECT_PROBLEM, MidiError, analyze, compare_with, describe, fix_file,
+                   fixed_name, midi_files, needs_project_fix, problems, read_midi, summary, verdict)
 
 APP_NAME = "MIDI Tempo Fix"
-WILDCARD = "MIDI files (*.mid;*.midi;*.smf)|*.mid;*.midi;*.smf;*.MID;*.MIDI|All files|*.*"
+# Every type a folder check finds (MIDI_EXTENSIONS), in both cases for systems whose filters are case-sensitive
+MIDI_PATTERNS = ";".join(f"*{e};*{e.upper()}" for e in MIDI_EXTENSIONS)
+WILDCARD = f"MIDI files|{MIDI_PATTERNS}|All files|*.*"
 AUDIO_TYPES = (".wav", ".wave", ".aif", ".aiff", ".aifc", ".mp3", ".m4a", ".aac", ".flac", ".caf", ".ogg", ".opus")
 COMPARE_WILDCARD = (
     "Recordings, MIDI files and REAPER projects|"
-    + ";".join(f"*{e};*{e.upper()}" for e in AUDIO_TYPES + (".mid", ".midi", ".smf", ".rmi", ".rpp"))
+    + ";".join(f"*{e};*{e.upper()}" for e in AUDIO_TYPES + MIDI_EXTENSIONS + (".rpp",))
     + "|All files|*.*"
 )
 INTRO = (

@@ -14,13 +14,17 @@ removing one is the same as for a typed one.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 
 import wx
 
 from . import ableton as A
-from .gui import drop_mac_mnemonics, keys
+from .gui import MIDI_PATTERNS, drop_mac_mnemonics, keys
 from .core import MidiError
+
+
+CMD = "Control" if sys.platform == "win32" else "Command"  # how a shortcut is said on each system
 
 
 def _beat_text(beat: float) -> str:
@@ -100,6 +104,9 @@ class AbletonDialog(wx.Dialog):
         self.set_path: str | None = None
         self.live_set: A.LiveSet | None = None
         self.result = None
+        # The REAPER project the main window compared a file with: its padded short bars are undone
+        # here too, or every locator after one would land late
+        self.projects = dict(getattr(main, "project_for", {}) or {})
         self._preview_timer = None
         self._loading = False
 
@@ -126,7 +133,7 @@ class AbletonDialog(wx.Dialog):
         intro.Wrap(520)
         s.Add(intro, 0, wx.ALL, 12)
 
-        self.source = add("&Song from", wx.TextCtrl(p, style=wx.TE_READONLY, name="Song from"))
+        self.source = add("Song &from", wx.TextCtrl(p, style=wx.TE_READONLY, name="Song from"))
         src_buttons = wx.BoxSizer(wx.HORIZONTAL)
         self.choose_midi = wx.Button(p, label="Choose MIDI File or REAPER Project...")
         self.choose_midi.SetToolTip("The MIDI file or REAPER project whose markers, tempo and time signatures make "
@@ -139,7 +146,7 @@ class AbletonDialog(wx.Dialog):
 
         self.songs_choice = None
         if len(self.files) > 1:
-            self.songs_choice = add("S&ongs", wx.Choice(p, choices=[
+            self.songs_choice = add("Songs", wx.Choice(p, choices=[
                 "Just this one", f"All {len(self.files)} files, back to back in one set",
                 f"All {len(self.files)} files, one set each"], name="Songs"))
             self.songs_choice.SetSelection(0)
@@ -150,34 +157,45 @@ class AbletonDialog(wx.Dialog):
         self.signature = add("Time si&gnature, with no file", wx.TextCtrl(p, value="4/4", name="Time signature"))
         self.signature.SetToolTip("Like 4/4 or 6/8.")
 
-        self.name = add("Song &name", wx.TextCtrl(p, name="Song name"))
+        self.name = add("&Song name", wx.TextCtrl(p, name="Song name"))
         self.name.SetToolTip("The song locator's name: what AbleSet shows in the setlist. It goes at the very start of the "
                               "song on its own, so it isn't one of your markers. An Intro on bar 1 shares that spot.")
 
-        self.list = add("&Markers", wx.ListBox(p, style=wx.LB_SINGLE, size=(-1, 170), name="Markers"))
+        self.list = add("Mar&kers", wx.ListBox(p, style=wx.LB_SINGLE, size=(-1, 170), name="Markers"))
         mac_accessibility_label(self.list, "Markers")
-        self.list.SetToolTip("Every marker, by bar and beat. Add as many as you like.")
+        self.list.SetToolTip("Every marker, by bar and beat, the file's own included: change, remove or add any of "
+                             f"them. Your file isn't changed, only the set. {CMD}-Z here undoes the last change.")
         mk = wx.BoxSizer(wx.HORIZONTAL)
         self.change_btn = wx.Button(p, label="&Change")
         self.change_btn.SetToolTip("Puts the selected marker in the fields below to change it. Return in the list "
                                    "does the same.")
         self.remove_btn = wx.Button(p, label="&Remove")
         self.remove_btn.SetToolTip("Remove the selected marker. Delete in the list does the same.")
-        self.several_btn = wx.Button(p, label="Edit as &Text...")
+        self.several_btn = wx.Button(p, label="Edit as Te&xt...")
         self.several_btn.SetToolTip("Every marker as plain text, one per line, like 17 Verse: edit them all at "
                                     "once, paste a list in, or copy them out.")
-        for b in (self.change_btn, self.remove_btn, self.several_btn):
+        self.undo_btn = wx.Button(p, label="&Undo")
+        self.undo_btn.SetToolTip("Takes back the last change to the markers: an add, a change, a remove or an edit as "
+                                 f"text. Press it again to go further back. {CMD}-Z in the list does the same.")
+        for b in (self.change_btn, self.remove_btn, self.undo_btn, self.several_btn):
             mk.Add(b, 0, wx.RIGHT, 8)
         s.Add(mk, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
+        self.save_midi_btn = wx.Button(p, label="Save Markers in a M&IDI Copy...")
+        self.save_midi_btn.SetToolTip("Saves a copy of the MIDI file with these markers in it, so other apps get "
+                                      "your changes too. The copy goes next to your file; the file itself is never "
+                                      "changed. Cue points are saved as markers, and if the file's timing needed "
+                                      "fixing, the copy's is fixed too.")
+        s.Add(self.save_midi_btn, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
+        self.undo: list[tuple] = []  # (the list as it was, what was done, the marker to land on), newest last
 
         # A new marker is typed right here, no window of its own: closing a small window made
         # VoiceOver read this whole window again and lose the new row. Return adds it and comes
         # back to Bar, so a long list goes in quickly.
         self.m_bar = add("New marker: &bar", wx.TextCtrl(p, value="1", style=wx.TE_PROCESS_ENTER, name="Bar"))
-        self.m_bar.SetToolTip("The bar, counting the first as 1. Command-N comes here.")
+        self.m_bar.SetToolTip(f"The bar, counting the first as 1. {CMD}-N comes here.")
         self.m_beat = add("B&eat", wx.TextCtrl(p, value="1", style=wx.TE_PROCESS_ENTER, name="Beat"))
         self.m_beat.SetToolTip("1 is the downbeat. Halfway to beat 3 is 2.5.")
-        self.m_name = add("Marker na&me", wx.TextCtrl(p, style=wx.TE_PROCESS_ENTER, name="Marker name"))
+        self.m_name = add("Marker &name", wx.TextCtrl(p, style=wx.TE_PROCESS_ENTER, name="Marker name"))
         self.m_name.SetToolTip("Like Verse 2. Put each one where that part starts, an Intro too, even on bar 1. End marks "
                                  "where the song stops. Return adds it.")
         self.add_btn = wx.Button(p, label="&Add Marker")
@@ -186,11 +204,11 @@ class AbletonDialog(wx.Dialog):
 
         # Lyrics: AbleSet shows them as they're sung, from a +LYRICS track with one clip per line
         self.lyric_items: list[A.TypedMarker] = []
-        self.lyrics_cb = wx.CheckBox(p, label="Add a lyrics trac&k for AbleSet")
+        self.lyrics_cb = wx.CheckBox(p, label="Add a l&yrics track for AbleSet")
         self.lyrics_cb.SetToolTip("One clip per line on a track named Lyrics +LYRICS, or on the set's own +LYRICS "
                                   "track. The lines come from the MIDI file's lyrics, or type them in.")
         s.Add(self.lyrics_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-        self.lyrics_btn = wx.Button(p, label="Edit L&yrics as Text...")
+        self.lyrics_btn = wx.Button(p, label="Edit Lyrics as Text...")
         self.lyrics_btn.SetToolTip("Every lyric line, one per line with its bar and beat, like 17 First line: "
                                    "read them, fix them, paste them in or copy them out.")
         s.Add(self.lyrics_btn, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
@@ -215,14 +233,14 @@ class AbletonDialog(wx.Dialog):
             "As a new copy next to the set", "Update the set itself, keeping a backup"], name="Save"))
         self.save_as.SetSelection(0)
 
-        self.style = add("Locator &names", wx.Choice(p, choices=[
+        self.style = add("L&ocator names", wx.Choice(p, choices=[
             "For AbleSet: the song's name, > Verse, SONG END", "For Live on its own: just the marker names"],
             name="Locator names"))
         self.style.SetSelection(1 if self.cfg.ReadBool("ableton_plain", False) else 0)
         self.quick = wx.CheckBox(p, label="Make every section a &quick-jump section (>>)")
         self.quick.SetValue(self.cfg.ReadBool("ableton_quick", False))
         s.Add(self.quick, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-        self.song_end = wx.CheckBox(p, label="Add SONG &END where the song ends")
+        self.song_end = wx.CheckBox(p, label="Add SONG EN&D where the song ends")
         self.song_end.SetValue(self.cfg.ReadBool("ableton_song_end", True))
         self.song_end.SetToolTip("At an End marker if there is one, otherwise at the end of the bar where the music "
                                  "stops.")
@@ -242,6 +260,10 @@ class AbletonDialog(wx.Dialog):
         b.Add(cancel, 0, wx.RIGHT, 8)
         b.Add(self.make)
         outer.Add(b, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+        self.status = None
+        if sys.platform == "win32":  # see _say: the main window's status bar is out of reach behind this one
+            self.status = wx.StatusBar(self)
+            outer.Add(self.status, 0, wx.EXPAND)
         self.SetSizer(outer)
         for c in p.GetChildren():  # the scroll bar is for the mouse; Tab should go control to control
             if isinstance(c, wx.ScrollBar):
@@ -264,6 +286,8 @@ class AbletonDialog(wx.Dialog):
         self.Bind(wx.EVT_CLOSE, self.on_cancel)
         self.change_btn.Bind(wx.EVT_BUTTON, self.on_change)
         self.remove_btn.Bind(wx.EVT_BUTTON, self.on_remove)
+        self.undo_btn.Bind(wx.EVT_BUTTON, self.on_undo)
+        self.save_midi_btn.Bind(wx.EVT_BUTTON, self.on_save_midi)
         self.several_btn.Bind(wx.EVT_BUTTON, self.on_several)
         self.lyrics_btn.Bind(wx.EVT_BUTTON, self.on_lyrics)
         self.lyrics_cb.Bind(wx.EVT_CHECKBOX, self.on_option)
@@ -295,17 +319,19 @@ class AbletonDialog(wx.Dialog):
 
     def _load_midi(self, path: str | None):
         self.path = path
+        self.file_original = []
         self._loading = True
         self.items = [(m, t) for m, t in self.items if t == "typed"]
         if getattr(self, "editing", None) is not None and not any(m is self.editing for m, _ in self.items):
             self._stop_editing()
         if path:
             try:
-                file_items, _ = A.file_markers_typed(path)
+                file_items, _ = A.file_markers_typed(path, self._project())
             except (MidiError, OSError, ValueError) as e:
                 wx.MessageBox(f"{os.path.basename(path)} couldn't be read: {e}.", "Make an Ableton Set", wx.OK, self)
                 file_items = []
                 self.path = None
+            self.file_original = sorted((m.bar, round(m.beat, 6), m.text) for m in file_items)
             self.items = [(m, "file") for m in file_items] + self.items
             self.items.sort(key=lambda x: (x[0].bar, x[0].beat))
             self.source.SetValue(os.path.basename(path) if self.path else "No file: markers typed in only")
@@ -313,7 +339,7 @@ class AbletonDialog(wx.Dialog):
             self.lyric_items, self.lyrics_said = [], []
             if self.path and not A.is_rpp(self.path):
                 try:
-                    self.lyric_items, self.lyrics_said = A.file_lyrics_typed(self.path)
+                    self.lyric_items, self.lyrics_said = A.file_lyrics_typed(self.path, self._project())
                 except (MidiError, OSError, ValueError):
                     pass
             self.lyrics_cb.SetValue(bool(self.lyric_items))
@@ -323,8 +349,24 @@ class AbletonDialog(wx.Dialog):
             self.source.SetValue("No file: markers typed in only")
             self.lyric_items, self.lyrics_said = [], []  # nothing of the last file's stays behind
             self.lyrics_cb.SetValue(False)
+        self.undo = []
+        # What Cancel compares with: the file's own markers only, so markers typed before choosing
+        # another file still count as work to lose
+        self.original = getattr(self, "file_original", []) if self.path else []
         self._loading = False
         self._fill()
+
+    def _project(self) -> str | None:
+        return self.projects.get(self.path) if self.path and not A.is_rpp(self.path) else None
+
+    def _snapshot(self):
+        return sorted((m.bar, round(m.beat, 6), m.text) for m, _ in self.items)
+
+    def _push(self, what: str, focus=None):
+        """Remember the list before a change, so Undo can put it back and land on the marker it restored."""
+        if focus is None and 0 <= self.list.GetSelection() < len(self.items):
+            focus = self.items[self.list.GetSelection()][0]
+        self.undo.append(([(m, t) for m, t in self.items], what, focus))
 
     def _load_set(self, path: str, quiet: bool = False):
         try:
@@ -353,11 +395,13 @@ class AbletonDialog(wx.Dialog):
         which = self.songs_choice.GetSelection() if self.songs_choice else 0
         want_lyrics = self.lyrics_cb.GetValue()
         if which and self.files:
-            return [A.plan_song(f, lyrics="file" if want_lyrics else None, **opts) for f in self.files]
+            return [A.plan_song(f, lyrics="file" if want_lyrics else None, project=self.projects.get(f), **opts)
+                    for f in self.files]
         lyrics = list(self.lyric_items) if want_lyrics else None
         name = self.name.GetValue().strip() or None
         if self.path:
-            return [A.plan_song(self.path, name, typed=typed, file_markers=False, lyrics=lyrics, **opts)]
+            return [A.plan_song(self.path, name, typed=typed, file_markers=False, lyrics=lyrics,
+                                project=self._project(), **opts)]
         try:
             tempo = float(self.tempo.GetValue().strip() or "120")
         except ValueError:
@@ -392,6 +436,8 @@ class AbletonDialog(wx.Dialog):
         has = self.list.GetSelection() != wx.NOT_FOUND
         self.change_btn.Enable(has)
         self.remove_btn.Enable(has)
+        self.undo_btn.Enable(bool(getattr(self, "undo", None)))
+        midi_file = bool(self.path) and not A.is_rpp(self.path)
         no_file = self.path is None
         existing = self.dest.GetSelection() == self.EXISTING
         several = bool(self.songs_choice and self.songs_choice.GetSelection())
@@ -407,6 +453,11 @@ class AbletonDialog(wx.Dialog):
                 changed = True
         for c in (self.add_btn, self.several_btn, self.list, self.m_bar, self.m_beat, self.m_name, self.lyrics_btn):
             c.Enable(not several)
+        if self.save_midi_btn.IsShown() != (midi_file and not several):
+            self.save_midi_btn.Show(midi_file and not several)
+            changed = True
+        if several:
+            self.undo_btn.Enable(False)
         label = f"Choose Set... ({os.path.basename(self.set_path)})" if self.set_path else "Choose Set..."
         if self.choose_set.GetLabel() != label:
             self.choose_set.SetLabel(label)
@@ -499,8 +550,8 @@ class AbletonDialog(wx.Dialog):
 
     def on_choose_midi(self, _):
         with wx.FileDialog(self, "Choose a MIDI file or a REAPER project", defaultDir=self.cfg.Read("last_dir", ""),
-                           wildcard="MIDI files and REAPER projects|*.mid;*.midi;*.smf;*.MID;*.MIDI;*.rpp;*.RPP;*.rpp-bak|"
-                                    "All files|*.*",
+                           wildcard="MIDI files and REAPER projects|" + MIDI_PATTERNS +
+                                    ";*.rpp;*.RPP;*.rpp-bak;*.RPP-bak|All files|*.*",
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as d:
             if d.ShowModal() != wx.ID_OK:
                 return
@@ -520,7 +571,7 @@ class AbletonDialog(wx.Dialog):
         if self.songs_choice:
             self.songs_choice.SetSelection(0)
             self.songs_choice.Disable()
-        self.main.tell("No file. Type the markers, tempo and time signature.")
+        self._tell("No file. Type the markers, tempo and time signature.")
         self.tempo.SetFocus()
 
     def _fonts(self, ctrls):
@@ -539,12 +590,36 @@ class AbletonDialog(wx.Dialog):
             c.Wrap(max(300, self.GetClientSize().width - 60))
 
     def _say(self, text: str):
+        """News for the listener: VoiceOver on a Mac; this window's own status bar on Windows.
+
+        The main window's status bar is behind this window while it's open, so on Windows
+        the line goes in a status bar here, where NVDA (Insert-End) and JAWS (Insert-Page
+        Down) read it. Refusals use _refuse, which every screen reader reads at once.
+        """
+        if sys.platform == "win32":
+            if self.status is not None:
+                self.status.SetStatusText(text)
+            return
         from .gui import announce
         announce(text)
 
+    def _tell(self, text: str):
+        self.main.SetStatusText(text)
+        self._say(text)
+
+    def _refuse(self, text: str):
+        """Why something wasn't done. A Windows screen reader reads a message box at once; announce() can't."""
+        self.main.SetStatusText(text)
+        if sys.platform == "win32":
+            wx.MessageBox(text, "Make an Ableton Set", wx.OK, self)
+        else:
+            self._say(text)
+
     def on_list_key(self, e):
         k = e.GetKeyCode()
-        if k in (wx.WXK_DELETE, wx.WXK_BACK):
+        if k == ord("Z") and e.CmdDown() and not e.ShiftDown():
+            self.on_undo(None)
+        elif k in (wx.WXK_DELETE, wx.WXK_BACK):
             self.on_remove(None)
         elif k in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
             self.on_change(None)
@@ -581,8 +656,7 @@ class AbletonDialog(wx.Dialog):
             if bar < 1:
                 raise ValueError
         except ValueError:
-            self._say("Write the bar as a whole number. The song's first bar is 1.")
-            self.main.SetStatusText("Write the bar as a whole number.")
+            self._refuse("Write the bar as a whole number. The song's first bar is 1.")
             self.m_bar.SetFocus()
             return None
         try:
@@ -590,8 +664,7 @@ class AbletonDialog(wx.Dialog):
             if beat < 1:
                 raise ValueError
         except ValueError:
-            self._say("Write the beat as a number: 1 is the downbeat, 2.5 is halfway to beat 3.")
-            self.main.SetStatusText("Write the beat as a number.")
+            self._refuse("Write the beat as a number: 1 is the downbeat, 2.5 is halfway to beat 3.")
             self.m_beat.SetFocus()
             return None
         return A.TypedMarker(bar, beat, self.m_name.GetValue().strip())
@@ -605,7 +678,7 @@ class AbletonDialog(wx.Dialog):
                     if A.is_rpp(self.path):
                         self._sigs = A._rpp_maps(self.path, said)[1]
                     else:
-                        self._sigs = A._file_maps(A._music(self.path, None, said), said)[1]
+                        self._sigs = A._file_maps(A._music(self.path, self._project(), said), said)[1]
                 except (MidiError, OSError, ValueError):
                     return None
                 self._sigs_for = self.path
@@ -621,15 +694,13 @@ class AbletonDialog(wx.Dialog):
         if m is None:
             return
         if not m.text:
-            self._say("Give the marker a name first.")
-            self.main.SetStatusText("Give the marker a name first.")
+            self._refuse("Give the marker a name first.")
             self.m_name.SetFocus()
             return
         taken = [x for x, _ in self.items if x is not self.editing and x.bar == m.bar and abs(x.beat - m.beat) < 1e-6]
         if taken:
             said = f"There's already a marker there: {marker_row(taken[0], 'typed')}. Change that one instead."
-            self._say(said)
-            self.main.SetStatusText(said)
+            self._refuse(said)
             self.m_bar.SetFocus()
             return
         sigs = None if self._onto() and not self.path else self._song_sigs()  # onto a song: its bars, checked on Make
@@ -638,13 +709,14 @@ class AbletonDialog(wx.Dialog):
                 A.resolve_marker(sigs, m)
             except A.SetError as e:
                 msg = str(e)
-                self._say(msg[0].upper() + msg[1:] + ".")
-                self.main.SetStatusText(msg[0].upper() + msg[1:] + ".")
+                self._refuse(msg[0].upper() + msg[1:] + ".")
                 self.m_beat.SetFocus()
                 self.m_beat.SetSelection(-1, -1)
                 return
         rows = [i for i, (x, _) in enumerate(self.items) if x is self.editing]
         changing = bool(rows)
+        self._push(f"changed {marker_row(*self.items[rows[0]])}" if changing else f"added {marker_row(m, 'typed')}",
+                   self.items[rows[0]][0] if changing else None)
         if changing:
             self.items[rows[0]] = (m, "typed")
         else:
@@ -678,11 +750,10 @@ class AbletonDialog(wx.Dialog):
         wx.CallLater(700, lambda: self._say(said))
 
     def on_cancel(self, e):
-        typed = sum(1 for _, t in self.items if t == "typed")
-        if typed and self.result is None:
-            word = "marker" if typed == 1 else "markers"
+        # Any change counts, a file marker removed or changed as much as one typed in
+        if self._snapshot() != self.original and self.result is None:
             # Two buttons, the safe one titled exactly Cancel: macOS gives Escape only to that title
-            with wx.MessageDialog(self, f"Close without making the set? The {typed} {word} you typed will be "
+            with wx.MessageDialog(self, "Close without making the set? Your changes to the markers will be "
                                         "lost. Cancel keeps working.", "Make an Ableton Set",
                                   wx.OK | wx.CANCEL | wx.CANCEL_DEFAULT) as q:
                 q.SetOKCancelLabels("Close Anyway", "Cancel")
@@ -695,12 +766,54 @@ class AbletonDialog(wx.Dialog):
         sel = self._selected()
         if not 0 <= sel < len(self.items):
             return
+        self._push(f"removed {marker_row(*self.items[sel])}", self.items[sel][0])
         m, t = self.items.pop(sel)
         if m is self.editing:
             self._stop_editing()
         self._fill(min(sel, len(self.items) - 1) if self.items else None)
-        self.main.tell(f"Removed {marker_row(m, t)}. {len(self.items)} markers left.")
+        said = f"Removed {marker_row(m, t)}. {len(self.items)} markers left."
+        self.main.SetStatusText(said)
+        self._say(said)
         (self.list if self.items else self.m_bar).SetFocus()
+
+    def on_undo(self, _):
+        if not self.undo:
+            self._refuse("Nothing to undo.")
+            return
+        items, what, focus = self.undo.pop()
+        self.items = items
+        self._stop_editing()
+        self._fill(next((i for i, (m, _) in enumerate(items) if m is focus), 0))
+        said = f"Undid: {what}. {len(self.items)} markers."
+        self.main.SetStatusText(said)
+        self.list.SetFocus() if self.items else self.m_bar.SetFocus()
+        wx.CallLater(700, lambda: self._say(said))
+
+    def on_save_midi(self, _):
+        if not self.path or A.is_rpp(self.path):
+            return
+        start = A.markers_copy_name(self.path)
+        with wx.FileDialog(self, "Save the markers in a copy of the MIDI file", os.path.dirname(start),
+                           os.path.basename(start), "MIDI files|*.mid;*.MID",
+                           wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as d:
+            if d.ShowModal() != wx.ID_OK:
+                self._land(self.save_midi_btn, after_file_dialog=True)
+                return
+            out = d.GetPath()
+        try:
+            said = A.save_markers_midi(self.path, [m for m, _ in self.items], out, self._project())
+        except (A.SetError, MidiError, OSError, ValueError) as e:
+            msg = str(e)
+            wx.MessageBox(msg[0].upper() + msg[1:] + ".", "Save Markers", wx.OK, self)
+            self._land(self.save_midi_btn)
+            return
+        fixed = (" Its timing is fixed too, the way Fix would." if any("tempo map fixed" in x or "Undid REAPER" in x
+                                                                      for x in said) else "")
+        msg = (f"Saved {os.path.basename(out)} with {len(self.items)} "
+               f"{'marker' if len(self.items) == 1 else 'markers'}.{fixed} Your file wasn't changed.")
+        self.main.SetStatusText(msg)
+        self._land(self.save_midi_btn, after_file_dialog=True)
+        wx.CallLater(2600, lambda: self._say(msg))
 
     def on_several(self, _):
         before = len(self.items)
@@ -719,6 +832,7 @@ class AbletonDialog(wx.Dialog):
                     msg = str(e)
                     wx.MessageBox(msg[0].upper() + msg[1:] + ". Nothing was changed.", "Markers", wx.OK, self)
                     return
+        self._push("edited the markers as text")
         # A line left as it was keeps "(from the file)"
         was = {(m.bar, round(m.beat, 6), m.text): t for m, t in self.items}
         self.items = sorted(((m, was.get((m.bar, round(m.beat, 6), m.text), "typed")) for m in new),
@@ -853,7 +967,7 @@ class AbletonDialog(wx.Dialog):
                 return
         wx.BeginBusyCursor()
         self.make.Disable()
-        self.main.tell("Making the set...")
+        self._tell("Making the set...")
 
         def work():
             try:

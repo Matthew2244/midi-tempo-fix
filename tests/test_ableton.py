@@ -455,3 +455,83 @@ def test_review_fixes_for_lyrics_and_reaper(tmp_path):
     empty.write_text("")
     with pytest.raises(A.SetError, match="empty"):
         A.plan_song(str(empty))
+
+
+def test_markers_saved_into_a_midi_copy_read_back_exactly(tmp_path):
+    src = midi(tmp_path / "Song.mid", [(0, marker("Intro")), (4 * 4 * PPQ, marker("Verse")),
+                                      (6 * 4 * PPQ, timesig(3, 2)), (0, bytes([0x90, 60, 90])),
+                                      (8 * 4 * PPQ, bytes([0x80, 60, 0]))])
+    before = open(src, "rb").read()
+    new = A.parse_markers("1 Count\n3 Intro\n5.3 Hit\n7.2 Waltz bit\n9 Verse")
+    out = A.markers_copy_name(src)
+    assert out.endswith("Song (markers).mid")
+    A.save_markers_midi(src, new, out)
+    assert open(src, "rb").read() == before  # the original is never written
+    back, _ = A.file_markers_typed(out)
+    assert [(m.bar, m.beat, m.text) for m in back] == [(m.bar, m.beat, m.text) for m in new]
+    assert not os.path.exists(out + ".check")
+    # the notes come through untouched
+    from midi_tempo.core import read_midi
+    a, b = read_midi(src), read_midi(out)
+    notes = lambda mf: [(e.tick, e.raw) for t in mf.tracks for e in t if not e.is_meta]
+    assert notes(a) == notes(b)
+
+
+def test_markers_past_the_end_move_end_of_track(tmp_path):
+    src = midi(tmp_path / "S.mid", [(0, bytes([0x90, 60, 90])), (4 * PPQ, bytes([0x80, 60, 0]))])
+    out = str(tmp_path / "S2.mid")
+    A.save_markers_midi(src, A.parse_markers("1 A\n20 Far"), out)
+    from midi_tempo.core import read_midi
+    t0 = read_midi(out).tracks[0]
+    assert t0[-1].meta_type == 0x2F and t0[-1].tick >= 19 * 4 * PPQ
+    assert [m.text for m in A.file_markers_typed(out)[0]] == ["A", "Far"]
+
+
+def test_markers_copy_refuses_to_overwrite_its_source(tmp_path):
+    src = midi(tmp_path / "S.mid", [(0, marker("A"))])
+    with pytest.raises(A.SetError, match="over the file"):
+        A.save_markers_midi(src, A.parse_markers("1 B"), src)
+
+
+def test_no_markers_left_makes_a_copy_without_any(tmp_path):
+    src = midi(tmp_path / "S.mid", [(0, marker("A")), (4 * PPQ, marker("B"))])
+    out = str(tmp_path / "none.mid")
+    A.save_markers_midi(src, [], out)
+    assert A.file_markers_typed(out)[0] == []
+
+
+def test_markers_copy_refuses_a_name_that_differs_only_in_case(tmp_path):
+    src = midi(tmp_path / "song.mid", [(0, marker("A"))])
+    other = str(tmp_path / "SONG.mid")
+    if not os.path.exists(other):
+        pytest.skip("this file system tells SONG.mid and song.mid apart")
+    before = open(src, "rb").read()
+    with pytest.raises(A.SetError, match="over the file"):
+        A.save_markers_midi(src, A.parse_markers("1 B"), other)
+    assert open(src, "rb").read() == before
+
+
+def test_a_marker_named_with_a_hash_saves(tmp_path):
+    src = midi(tmp_path / "S.mid", [(0, marker("A"))])
+    out = str(tmp_path / "copy.mid")
+    A.save_markers_midi(src, [A.TypedMarker(1, 1, "#1 hit")], out)
+    assert [m.text for m in A.file_markers_typed(out)[0]] == ["1 hit"]
+
+
+def test_the_command_line_saves_markers_into_a_copy(tmp_path, capsys):
+    from midi_tempo import cli
+    src = midi(tmp_path / "S.mid", [(0, marker("Intro")), (8 * PPQ, marker("Verse"))])
+    out = str(tmp_path / "S2.mid")
+    assert cli.main(["ableton", src, "--marker", "3 Verse 2", "--marker", "1 Count", "--save-midi", out]) == 0
+    assert [(m.bar, m.text) for m in A.file_markers_typed(out)[0]] == [(1, "Count"), (3, "Verse 2")]
+    assert "wasn't changed" in capsys.readouterr().out
+    assert cli.main(["ableton", src, out, "--save-midi", str(tmp_path / "x.mid")]) == 2
+
+
+def test_every_shortcut_letter_in_the_ableton_window_is_used_once():
+    import re
+    src = open(os.path.join(os.path.dirname(A.__file__), "ableton_gui.py"), encoding="utf-8").read()
+    labels = re.findall(r'(?:add\(|label=|wx\.ID_OK, )"([^"]*&[^"&][^"]*)"', src)
+    letters = [re.search(r"&([^&])", l).group(1).lower() for l in labels]
+    dupes = {c: [l for l, x in zip(labels, letters) if x == c] for c in letters if letters.count(c) > 1}
+    assert len(labels) > 20 and not dupes, dupes

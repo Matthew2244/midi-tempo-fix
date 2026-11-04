@@ -42,7 +42,8 @@ import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
-from .core import (HINT, MidiError, _tempo_list, analyze, match_project_bars, n, problems, read_midi, repair,
+from .core import (HINT, Event, MidiError, _tempo_list, _vlq_write, analyze, match_project_bars, n, problems,
+                   read_midi, repair, write_midi,
                    rpp_beat_at_seconds, rpp_seconds_at_beat, rpp_tempo_points, rpp_time_signatures, time_signatures)
 
 PRE = -63072000  # Live's time for the value an envelope holds before the arrangement starts
@@ -466,6 +467,77 @@ def file_markers_typed(path: str, project: str | None = None) -> tuple[list[Type
         bar, beat = bar_number(sigs, b)
         out.append(TypedMarker(bar, round(beat, 6), text))
     return out, said
+
+
+def markers_copy_name(path: str) -> str:
+    """Where Save Markers in a MIDI Copy puts the copy by default: next to the file, never over it."""
+    stem, ext = os.path.splitext(path)
+    if ext.lower() in (".rmi", ""):
+        ext = ".mid"
+    return f"{stem} (markers){ext}"
+
+
+def _marker_text(text: str) -> str:
+    """A marker's name as it reads back from a file: what midi_markers makes of it."""
+    text = "".join(" " if ord(c) < 32 else c for c in text.replace("\x00", "")).strip()
+    return text[1:].strip() if text.startswith("#") else text
+
+
+def save_markers_midi(path: str, markers: list[TypedMarker], out: str, project: str | None = None) -> list[str]:
+    """A copy of a MIDI file with its markers replaced by these, for any app to read.
+
+    The file is read the way Make Ableton Set reads it (tempo fixes applied in
+    memory), so every bar and beat lands where the list says. Every marker and
+    cue point in the file is taken out and the list is written as markers on
+    the first track. The copy is written to a temporary file, read back and
+    compared with the list, and only then given its name. The original is never
+    written to.
+    """
+    # samefile, not path text: on a Mac SONG.mid and Song.mid are one file (fix -o learned this first)
+    if os.path.realpath(out) == os.path.realpath(path) or (os.path.exists(out) and os.path.samefile(out, path)):
+        raise SetError("the copy can't be saved over the file it came from; choose another name")
+    if is_rpp(path):
+        raise SetError("markers can be saved into a copy of a MIDI file, not a REAPER project")
+    said: list[str] = []
+    mf = _music(path, project, said)
+    if mf.smpte:
+        raise SetError("this file counts time in video frames, so its markers can't be placed by bar and beat")
+    _, sigs = _file_maps(mf, said)
+    placed = []
+    for m in markers:
+        tick = round(resolve_marker(sigs, m) * mf.division)
+        data = m.text.encode("utf-8")
+        placed.append(Event(tick, bytes([0xFF, MARKER]) + _vlq_write(len(data)) + data))
+    tracks = [[e for e in events if not (e.meta_type in (MARKER, CUE) and HINT not in e.raw)]
+              for events in mf.tracks]
+    first = tracks[0]
+    end = first.pop() if first and first[-1].meta_type == 0x2F else None
+    for e in placed:
+        # After the other meta events on the same tick (tempo, time signature), before any notes
+        k = len(first)
+        for i, x in enumerate(first):
+            if x.tick > e.tick or (x.tick == e.tick and not x.is_meta):
+                k = i
+                break
+        first.insert(k, e)
+    last = max((e.tick for e in first), default=0)
+    first.append(Event(max(last, end.tick if end else 0), end.raw if end else b"\xff\x2f\x00"))
+    mf.tracks = tracks
+    tmp = out + ".check"
+    write_midi(tmp, mf)
+    try:
+        back, _ = file_markers_typed(tmp)
+        want = sorted((m.bar, m.beat, _marker_text(m.text)) for m in markers)
+        got = sorted((m.bar, m.beat, m.text) for m in back)
+        tol = 4 / mf.division  # a tick either way, in the smallest beat unit Live allows (a 16th)
+        if len(got) != len(want) or any(g[0] != w[0] or g[2] != w[2] or abs(g[1] - w[1]) > tol
+                                        for g, w in zip(got, want)):
+            raise SetError("the copy didn't read back with the same markers, so it wasn't kept")
+        os.replace(tmp, out)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return said
 
 
 def bar_start(sigs: list[tuple[float, int, int]], bar: int) -> float:
