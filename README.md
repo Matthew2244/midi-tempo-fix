@@ -56,9 +56,15 @@ Write the song anywhere, put markers where the sections start, and export MIDI. 
 - **What the set will hold** shows every locator, by bar and beat, before anything is saved. Afterwards, **File, Open the Last Ableton Set in Live** opens it.
 - **Bigger Text** in the View menu reaches this window too.
 
+**Straight from a REAPER project.** Choose the .RPP itself and skip the MIDI export: its markers, regions, tempo map and time signatures come straight from the project, and REAPER's =START and =END markers set where the song starts and ends. REAPER's tempo ramps are linear in time and Live's are linear in beats, so a ramp becomes small steps a 32nd note apart, the way REAPER's own MIDI export writes it. Checked on a real song: the set made from the project and the one made from its MIDI export agree to a tenth of a millisecond.
+
+**Lyrics for AbleSet.** Tick "Add a lyrics track for AbleSet" and the song's lyrics become a lyrics track: one clip per line, on a track named "Lyrics +LYRICS" (or the set's own +LYRICS track), so AbleSet shows each line as it's sung. They come from the MIDI file's lyrics (most notation apps and karaoke files carry them) or you type them in. **Edit Lyrics as Text** shows every line with its bar and beat, like `78 Patience...`, to read, fix, paste or copy. When a file has lyrics on several tracks (a lead and harmonies), the one with the most is used and the others are named. Where a file doesn't say where words end, syllables are kept apart by spaces for you to join.
+
 Markers can carry AbleSet's own notation straight from your DAW: "> Chorus +LOOP", "SONG END", "* note to self" all go through as written. Only AbleSet's capitals count as commands, so a section your band calls "Stop" stays a section and never stops the show. A marker called End, as the last marker, becomes SONG END. From REAPER, export with File, Export project MIDI, and set "Export project markers as MIDI" to markers.
 
 For Live on its own, **Locator names** can be just the marker names, with no song name and no SONG END.
+
+Putting markers onto a song whose tempo automation has curves works out the curves exactly. That was checked against Live's own clock: straight lines would have been off by up to six seconds.
 
 ## Download
 
@@ -111,13 +117,16 @@ midi-tempo fix --tempo-only song.mid
 midi-tempo ableton song.mid
 midi-tempo ableton song.mid --marker "17 Verse" --marker "33.3 Pickup"
 midi-tempo ableton song.mid --into "Show.als"
+midi-tempo ableton "My Song.RPP"
+midi-tempo ableton song.mid --lyrics
+midi-tempo ableton song.mid --lyrics-text lyrics.txt
 midi-tempo ableton --songs "Show.als"
 midi-tempo ableton song.mid --into "Show.als" --onto "Song Name" --line-up bars
 midi-tempo ableton --name "New Song" --tempo 96 --time 6/8 --markers markers.txt
 midi-tempo ableton *.mid --each
 ```
 
-`ableton` makes a Live set from markers: `--marker` adds typed ones, `--markers` reads a list from a file, `--into` adds to a set you have (a copy is saved), `--onto` puts the markers on a song already there, `--songs` lists a set's songs and each one's sections by bar, `--each` makes one set per file, `--plain` names locators for Live without AbleSet, and `--preview` says what the set would hold without saving anything.
+`ableton` makes a Live set from markers: `--marker` adds typed ones, `--markers` reads a list from a file, `--into` adds to a set you have (a copy is saved), `--onto` puts the markers on a song already there, `--songs` lists a set's songs and each one's sections by bar, `--each` makes one set per file, `--lyrics` adds the file's lyrics as an AbleSet lyrics track and `--lyrics-text` reads typed lines instead, `--plain` names locators for Live without AbleSet, and `--preview` says what the set would hold without saving anything.
 
 Both commands use every processor core but one; `--jobs 1` keeps it to one. `--json` prints the results in a form scripts and other tools can read. `check` starts each file with its verdict, and puts a summary line first when there's more than one. `--brief` gives one line per file. `-r` also looks inside folders within folders. `check` changes nothing. It exits with 0 when files are clean, 1 when something needs fixing, and 2 when a file can't be read. `fix` takes files or folders and saves a cleaned copy of each file that needs one. The command line needs nothing beyond Python itself, except checking against a recording, which needs numpy (`pip install numpy`). The app includes it. Recordings other than WAV are converted with afconvert on a Mac, or ffmpeg if it's installed. To open the app from a pip install, add the app extra (`pip install "midi-tempo-fix[app] @ git+https://github.com/Matthew2244/midi-tempo-fix"`) and run `midi-tempo-fix`.
 

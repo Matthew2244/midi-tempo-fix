@@ -43,7 +43,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 from .core import (HINT, MidiError, _tempo_list, analyze, match_project_bars, n, problems, read_midi, repair,
-                   time_signatures)
+                   rpp_beat_at_seconds, rpp_seconds_at_beat, rpp_tempo_points, rpp_time_signatures, time_signatures)
 
 PRE = -63072000  # Live's time for the value an envelope holds before the arrangement starts
 MARKER, CUE = 0x06, 0x07
@@ -92,6 +92,7 @@ class SongPlan:
     span_beat: float = 0.0  # where the song's music and tempo map really stop (may run past SONG END)
     typed: list = field(default_factory=list)  # the TypedMarkers it was given
     options: dict = field(default_factory=dict)
+    lyrics: list = field(default_factory=list)  # (beat, line) for AbleSet's lyrics track, from the song's start
     said: list[str] = field(default_factory=list)  # what was done to read it, worth telling
 
     @property
@@ -129,6 +130,8 @@ def song_name_for(path: str) -> str:
     the song's.
     """
     stem = os.path.splitext(os.path.basename(path))[0]
+    if is_rpp(path):
+        return stem.strip() or "Song"  # a project's name is the song's; "and MIDI" in it isn't a file type
     stem = re.sub(r"\s*\(tempo fixed\)\s*", " ", stem)
     stem = re.sub(r"[\s_-]*\b(midi( track| file)?|mid)\b[\s_-]*$", "", stem, flags=re.I)
     return stem.strip(" _-") or "Song"
@@ -289,14 +292,178 @@ def marker_line(m: TypedMarker) -> str:
     return f"{where} {m.text}".rstrip()
 
 
-def file_markers_typed(path: str, project: str | None = None) -> tuple[list[TypedMarker], list[str]]:
-    """A MIDI file's own markers as bar and beat, so they can be edited like typed ones."""
+LYRIC, KAR_TEXT = 0x05, 0x01
+SENTENCE_END = (".", "!", "?", ";", ":")
+
+
+def _track_name(events) -> str:
+    for e in events:
+        if e.meta_type == 0x03:
+            return e.meta_data().decode("utf-8", "replace").replace("\x00", "").strip()
+    return ""
+
+
+def midi_lyrics(mf) -> tuple[list[tuple[int, str, bool]], str, list[str]]:
+    """One track's lyrics: (tick, syllable, a new line starts here), that track's name, and the names
+    of other tracks that have lyrics too.
+
+    Parts sung together (a lead and harmonies, or verses in a hymn) each carry their own lyrics on
+    their own track, and mixed together they read "PaPaPatience". So the track with the most is
+    used, and the rest are named. Karaoke (.kar) files put the words in text events, with / starting
+    a new line, \\ a new verse and @ headers. Lyric events may end a line with a return or newline.
+    """
+    per_track = []
+    for events in mf.tracks:
+        lyric = [(e.tick, e.meta_data()) for e in events if e.meta_type == LYRIC]
+        if not lyric:
+            kar = [(e.tick, e.meta_data()) for e in events if e.meta_type == KAR_TEXT]
+            if sum(1 for _, d in kar if d[:1] in (b"/", b"\\")) >= 2:
+                lyric = [(tk, d) for tk, d in kar if not d.startswith(b"@") and HINT not in d]
+        if lyric:
+            per_track.append((len(lyric), _track_name(events), sorted(lyric, key=lambda x: x[0])))
+    if not per_track:
+        return [], "", []
+    best = max(per_track, key=lambda x: x[0])
+    others = [nm or "an unnamed track" for c, nm, ly in per_track if ly is not best[2]]
+    out, new_line = [], False
+    for tick, raw in best[2]:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+        if text[:1] in ("/", "\\"):
+            new_line, text = True, text[1:]
+        ends_line = text.endswith(("\r", "\n"))
+        text = "".join(" " if ord(c) < 32 else c for c in text.rstrip("\r\n"))
+        if text.strip() or text == " ":
+            out.append((tick, text, new_line))
+            new_line = False
+        if ends_line:
+            new_line = True
+    return out, best[1], others
+
+
+def lyric_lines(sylls: list[tuple[float, str, bool]], sigs, sections: list[float] = ()) -> tuple[list[tuple[float, str]], str]:
+    """Join syllables into words and words into lines: (beat, line), and how words were found.
+
+    Words: a file that marks word ends (a space after a word, or a hyphen inside one, as most apps
+    and karaoke files do) is joined that way. One that marks nothing (LilyPond's exports) can't
+    say where a word ends, so its syllables are kept apart by spaces, and the report says so.
+    Lines: where the file starts one; otherwise after a sentence ends, after a comma followed by a
+    rest, after a whole bar's rest, at a section, or once a line has run long and the singer breathes.
+    """
+    # Marked: a fair share of syllables say where words end. A stray space or two doesn't count.
+    marks = sum(1 for _, t, _ in sylls if t != t.strip() or t.rstrip().endswith("-"))
+    marked = marks >= max(2, len(sylls) // 5)
+    words: list[tuple[float, str, bool]] = []  # (beat of its first syllable, word, line starts here)
+    cur, start, nl = "", None, False
+    for b, t, new_line in sylls:
+        if start is None:
+            start, nl = b, new_line
+        elif new_line and cur:
+            words.append((start, cur, nl))
+            cur, start, nl = "", b, True
+        if marked:
+            piece = t.strip()
+            hyphen = piece.endswith("-")
+            cur += piece.rstrip("-")
+            if not hyphen and (t.endswith(" ") or not t.strip()):
+                if cur:
+                    words.append((start, cur, nl))
+                cur, start, nl = "", None, False
+        else:
+            words.append((b, t.strip(), new_line))
+            cur, start, nl = "", None, False
+    if cur:
+        words.append((start, cur, nl))
+    words = [w for w in words if w[1]]
+
+    def bar_len(at):
+        num, den = [x for x in sigs if x[0] <= at + 1e-9][-1][1:]
+        return num * 4 / den
+
+    lines: list[tuple[float, list[str]]] = []
+    explicit = any(nl for _, _, nl in words[1:])
+    for i, (b, w, nl) in enumerate(words):
+        if not lines:
+            lines.append((b, [w]))
+            continue
+        prev_b = words[i - 1][0]
+        prev = lines[-1][1][-1]
+        gap = b - prev_b
+        brk = nl
+        if not explicit:
+            brk = (prev.endswith(SENTENCE_END) and gap >= 1
+                   or prev.endswith(",") and gap >= 1.5
+                   or gap >= bar_len(prev_b) + 1e-6
+                   or any(prev_b < sct <= b + 1e-6 for sct in sections)
+                   or marked and len(lines[-1][1]) >= 9 and gap >= 1)  # syllables aren't words: no length rule
+        if brk:
+            lines.append((b, [w]))
+        else:
+            lines[-1][1].append(w)
+    how = "marked" if marked else "unmarked"
+    return [(b, " ".join(ws)) for b, ws in lines], how
+
+
+def file_lyrics_typed(path: str, project: str | None = None) -> tuple[list[TypedMarker], list[str]]:
+    """A MIDI file's lyrics as lines at a bar and beat, so they can be read and edited like markers."""
     said: list[str] = []
     mf = _music(path, project, said)
     _, sigs = _file_maps(mf, said)
+    raw, track, others = midi_lyrics(mf)
+    if not raw:
+        return [], ["This file has no lyrics. You can type them in."]
+    sections = [tick / mf.division for tick, _ in midi_markers(mf)]
+    lines, how = lyric_lines([(t / mf.division, x, nl) for t, x, nl in raw], sigs, sections)
+    said = [f"{n(len(lines), 'lyric line')} from {('the track ' + track) if track else 'the file'}."]
+    if others:
+        said.append(f"Other tracks have lyrics too ({', '.join(others)}); only one track's are used.")
+    if how == "unmarked":
+        said.append("This file doesn't mark where words end, so syllables are kept apart by spaces. "
+                    "Edit the lyrics to join them.")
     out = []
-    for tick, text in midi_markers(mf):
-        bar, beat = bar_number(sigs, tick / mf.division)
+    for b, text in lines:
+        bar, beat = bar_number(sigs, b)
+        out.append(TypedMarker(bar, round(beat, 6), text))
+    return out, said
+
+
+def lyric_clips(plan: SongPlan, at: float, limit: float | None = None) -> list[tuple[float, float, str, int, int]]:
+    """A song's lyric lines as clips in the set: each lasts until the next line, the last for a bar
+    (or to where the music ends), and none past limit (the song's own end) so no line runs into the
+    next song. Lines starting at or past it are left out and named in plan.said."""
+    limit = plan.span_beat if limit is None else limit
+    out, late = [], []
+    for i, (b, text) in enumerate(plan.lyrics):
+        if b >= limit - 1e-6:
+            late.append(text)
+            continue
+        num, den = [x for x in plan.sigs if x[0] <= b + 1e-9][-1][1:]
+        end = plan.lyrics[i + 1][0] if i + 1 < len(plan.lyrics) else max(b + num * 4 / den, min(
+            plan.span_beat, b + 4 * num * 4 / den))
+        out.append((at + b, at + min(end, limit), text, num, den))
+    if late:
+        note = (f"{n(len(late), 'lyric line')} came after where the song ends, so "
+                f"{'it was' if len(late) == 1 else 'they were'} left out: " + ", ".join(late) + ".")
+        if note not in plan.said:
+            plan.said.append(note)
+    return out
+
+
+def file_markers_typed(path: str, project: str | None = None) -> tuple[list[TypedMarker], list[str]]:
+    """A MIDI file's or REAPER project's own markers as bar and beat, so they can be edited like typed ones."""
+    said: list[str] = []
+    if is_rpp(path):
+        _, sigs, markers, _ = _rpp_maps(path, said)
+        found = [(b, text) for b, text, _ in markers]
+    else:
+        mf = _music(path, project, said)
+        _, sigs = _file_maps(mf, said)
+        found = [(tick / mf.division, text) for tick, text in midi_markers(mf)]
+    out = []
+    for b, text in found:
+        bar, beat = bar_number(sigs, b)
         out.append(TypedMarker(bar, round(beat, 6), text))
     return out, said
 
@@ -372,10 +539,154 @@ def _file_maps(mf, said):
     return tempos, sigs
 
 
+def is_rpp(path: str) -> bool:
+    """A REAPER project, including REAPER's own backup copies (.rpp-bak)."""
+    return path.lower().endswith((".rpp", ".rpp-bak"))
+
+
+_RPP_TOKEN = re.compile(r'"([^"]*)"|\'([^\']*)\'|`([^`]*)`|(\S+)')
+STEP = 0.125  # quarter notes: a REAPER ramp becomes steps a 32nd note apart, as REAPER's own MIDI export does
+
+
+def rpp_markers(path: str) -> list[tuple[float, str, bool]]:
+    """(seconds, name, is a region) for every marker and region start in a REAPER project.
+
+    A marker line is MARKER index seconds name flags ...; the name is quoted with ", ' or `
+    when it has spaces. A region is two lines with the same index and flag 1, its start and
+    its end; only the start is a section.
+    """
+    out, regions = [], set()
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            t = line.strip()
+            if not t.startswith("MARKER "):
+                continue
+            tok = [next(g for g in m.groups() if g is not None) for m in _RPP_TOKEN.finditer(t)]
+            if len(tok) < 4:
+                continue
+            try:
+                idx, sec = tok[1], float(tok[2])
+                flags = int(tok[4]) if len(tok) > 4 else 0
+            except ValueError:
+                continue
+            region = bool(flags & 1)
+            if region:
+                if idx in regions:
+                    continue  # the region's end
+                regions.add(idx)
+            out.append((sec, tok[3], region))
+    return sorted(out, key=lambda m: m[0])
+
+
+def rpp_items_end(path: str) -> float:
+    """Seconds where the last item in a REAPER project ends."""
+    end, pos = 0.0, None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            t = line.split()
+            if not t:
+                continue
+            if t[0] == "POSITION" and len(t) > 1:
+                pos = float(t[1])
+            elif t[0] == "LENGTH" and len(t) > 1 and pos is not None:
+                end = max(end, pos + float(t[1]))
+                pos = None
+    return end
+
+
+def _rpp_maps(path: str, said: list[str]):
+    """A REAPER project's tempo map, time signatures, markers and end, in quarter notes from its start.
+
+    REAPER ramps are linear in time and Live's are linear in beats, so a ramp can't be copied
+    as one; it becomes steps a 32nd note apart, each at the average tempo over its step, so
+    every step boundary lands exactly when REAPER plays it (REAPER's own MIDI export does the
+    same, and matched REAPER to a quarter of a millisecond). =START and =END are REAPER's
+    project start and end markers: the song starts and ends there.
+    """
+    def snap(b: float) -> float:
+        """Seconds back to beats leaves noise like 118.9999999999995; on a 3840th of a beat it's that beat."""
+        g = round(b * 3840) / 3840
+        return g if abs(g - b) < 1e-6 else b
+
+    if os.path.getsize(path) == 0:
+        raise SetError(f"{os.path.basename(path)} is empty. If it's in Dropbox, iCloud or OneDrive, it may not be "
+                       "downloaded to this computer yet")
+    pts = rpp_tempo_points(path)
+    if pts[0][0] > 1e-9:
+        pts = [(0.0, pts[0][1], 1)] + pts  # the tempo before the first point is that point's
+    beat_at = lambda t: rpp_beat_at_seconds(pts, t)  # noqa: E731
+    sec_at = rpp_seconds_at_beat(pts)
+    marks = rpp_markers(path)
+    start_s = next((m[0] for m in marks if m[1].upper() == "=START"), 0.0)
+    end_s = next((m[0] for m in marks if m[1].upper() == "=END"), None)
+    offset = beat_at(start_s)
+    if start_s:
+        said.append(f"The song starts at the project's =START marker, {start_s:.2f} seconds in.")
+
+    tempos: list[tuple[float, float]] = []
+    for i, (t0, bpm, shape) in enumerate(pts):
+        nxt = pts[i + 1] if i + 1 < len(pts) else None
+        b0 = snap(beat_at(t0))
+        if nxt and shape == 0 and abs(nxt[1] - bpm) > 1e-9:
+            b1 = snap(beat_at(nxt[0]))
+            b = b0
+            while b < b1 - 1e-9:
+                e = min(b + STEP, b1)
+                tempos.append((b, 60 * (e - b) / (sec_at(e) - sec_at(b))))
+                b = e
+        else:
+            tempos.append((b0, bpm))
+    sig0, sig_pts = rpp_time_signatures(path)
+    sigs = [(0.0, *sig0)] + [(snap(beat_at(t)), num, den) for t, num, den in sig_pts]
+
+    def from_start(events):
+        """Shift to the song's start; what's in force there becomes the first value."""
+        before = [e for e in events if e[0] <= offset + 1e-9]
+        after = [(e[0] - offset, *e[1:]) for e in events if e[0] > offset + 1e-9]
+        return [(0.0, *before[-1][1:])] + after
+
+    tempos, sigs = from_start(tempos), from_start(sigs)
+    clean_t: list[tuple[float, float]] = []
+    for b, bpm in tempos:
+        if not MIN_BPM <= bpm <= MAX_BPM:
+            said.append(f"Live's tempo runs from 20 to 999 BPM, so {bpm:g} BPM became "
+                        f"{min(max(bpm, MIN_BPM), MAX_BPM):g}.")
+            bpm = min(max(bpm, MIN_BPM), MAX_BPM)
+        if clean_t and abs(clean_t[-1][0] - b) < 1e-9:
+            clean_t[-1] = (b, bpm)
+        elif not clean_t or abs(clean_t[-1][1] - bpm) > 1e-9:
+            clean_t.append((b, bpm))
+    clean_s: list[tuple[float, int, int]] = []
+    for b, num, den in sigs:
+        if den not in LIVE_DENOMINATORS or not 1 <= num <= 99:
+            said.append(f"Live can't show {num}/{den}, so the time signature change there was left out.")
+            continue
+        if clean_s and abs(clean_s[-1][0] - b) < 1e-9:
+            clean_s[-1] = (b, num, den)
+        elif not clean_s or clean_s[-1][1:] != (num, den):
+            clean_s.append((b, num, den))
+
+    markers, after = [], []
+    for sec, name, _ in marks:
+        if name.upper() in ("=START", "=END") or sec < start_s - 1e-9:
+            continue
+        if end_s is not None and sec > end_s + 1e-9:
+            after.append(name)  # past the project's end: not part of the song
+            continue
+        markers.append((snap(beat_at(sec) - offset), name, "file"))
+    if after:
+        said.append(f"{n(len(after), 'marker')} after the project's =END {'was' if len(after) == 1 else 'were'} "
+                    "left out: " + ", ".join(after) + ".")
+    if end_s is not None and end_s > start_s:
+        markers.append((snap(beat_at(end_s) - offset), "SONG END", "file"))
+    music_end = bar_at_or_after(clean_s, max(beat_at(rpp_items_end(path)) - offset, 0.0))
+    return clean_t, clean_s, markers, music_end
+
+
 def plan_song(path: str | None, name: str | None = None, quick: bool = False, song_end: bool = True,
               plain: bool = False, project: str | None = None, typed: list[TypedMarker] | None = None,
               file_markers: bool = True, tempo: float | None = None,
-              signature: tuple[int, int] | None = None, set_sigs=None) -> SongPlan:
+              signature: tuple[int, int] | None = None, set_sigs=None, lyrics=None) -> SongPlan:
     """Work out a song: its locators, tempo map and time signatures.
 
     From a MIDI file, its markers and any typed ones; or, with no file, from
@@ -389,7 +700,11 @@ def plan_song(path: str | None, name: str | None = None, quick: bool = False, so
     """
     said: list[str] = []
     typed = list(typed or [])
-    if path:
+    if path and is_rpp(path):
+        tempos, sigs, markers, music_end = _rpp_maps(path, said)
+        if not file_markers:
+            markers = []
+    elif path:
         mf = _music(path, project, said)
         tempos, sigs = _file_maps(mf, said)
         markers = [(e_tick / mf.division, text, "file") for e_tick, text in midi_markers(mf)] if file_markers else []
@@ -465,7 +780,7 @@ def plan_song(path: str | None, name: str | None = None, quick: bool = False, so
         said.append(f"The music goes on {_beats_words(music_end - end_beat, sigs, end_beat)} past the marker "
                     "where SONG END is. The tempo map runs to the end of the music.")
     if path and not markers:
-        said.append("This file has no markers, so the song has no sections yet. You can type them in.")
+        said.append("This file has no markers, so the song has no sections yet.")
     off = [l for l in locs if l.kind != "song" and abs(l.beat * 4 - round(l.beat * 4)) > 0.01]
     if off:
         said.append(f"{n(len(off), 'marker')} {'is' if len(off) == 1 else 'are'} between beats ("
@@ -474,6 +789,21 @@ def plan_song(path: str | None, name: str | None = None, quick: bool = False, so
     plan = SongPlan(path or "", song, locs, tempos, sigs, end_beat, _seconds(tempos, end_beat), from_marker,
                     len(markers), span_beat=span, said=said)
     plan.typed, plan.options = typed, dict(quick=quick, song_end=song_end, plain=plain)
+    if lyrics == "file" and path and is_rpp(path):
+        said.append("A REAPER project doesn't hold lyrics in a form that can be read, so there's no lyrics track. "
+                    "Type them in instead.")
+    if lyrics == "file" and path and not is_rpp(path):
+        typed_lines, ly_said = file_lyrics_typed(path, project)
+        plan.lyrics = [(resolve_marker(sigs, m), m.text) for m in typed_lines]
+        said += ly_said
+    elif lyrics and lyrics != "file":
+        plan.lyrics = [(resolve_marker(sigs, m), m.text) for m in lyrics if m.text.strip()]
+    plan.lyrics.sort(key=lambda x: x[0])
+    if not path and plan.lyrics and not from_marker:
+        # Typed in with no End: the song runs a bar past its last line, so no line is cut off
+        last = plan.lyrics[-1][0]
+        plan.span_beat = max(plan.span_beat, bar_at_or_after(sigs, bar_at_or_after(sigs, last + 1e-3) + 1e-3))
+    plan.options["lyrics"] = lyrics
     return plan
 
 
@@ -498,22 +828,55 @@ def sig_from_value(v: int) -> tuple[int, int]:
     return v % 99 + 1, 2 ** (v // 99)
 
 
-class LiveTempo:
-    """A Live tempo envelope: straight lines in beats between points, a jump where two share a time."""
+def _bez(a: float, b: float, u: float) -> float:
+    """One axis of Live's automation curve: a cubic Bezier from 0 to 1 with control values a and b."""
+    return 3 * (1 - u) ** 2 * u * a + 3 * (1 - u) * u * u * b + u ** 3
 
-    def __init__(self, events: list[tuple[float, float]], manual: float):
-        self.points = sorted(events, key=lambda p: p[0]) or [(PRE, manual)]
-        pts = self.points
-        segs = [(-math.inf, pts[0][1], pts[0][0], pts[0][1])]
-        segs += [(t0, v0, t1, v1) for (t0, v0), (t1, v1) in zip(pts, pts[1:]) if t1 > t0]
-        segs.append((pts[-1][0], pts[-1][1], math.inf, pts[-1][1]))
+
+def _bez_d(a: float, b: float, u: float) -> float:
+    return 3 * (1 - u) ** 2 * a + 6 * (1 - u) * u * (b - a) + 3 * u * u * (1 - b)
+
+
+class LiveTempo:
+    """A Live tempo envelope: lines in beats between points, a jump where two share a time, and a curve
+    where a point carries CurveControl1X/1Y/2X/2Y.
+
+    A curve is a cubic Bezier across its segment, time on one axis and tempo on the other, both
+    0 to 1 from this point to the next. Proven against Live and AbleSet: see HANDOFF.
+    """
+
+    def __init__(self, events: list[tuple], manual: float):
+        pts = sorted(((e[0], e[1], e[2] if len(e) > 2 else None) for e in events), key=lambda p: p[0])
+        self.points = [(t, v) for t, v, _ in pts] or [(PRE, manual)]
+        pts = pts or [(PRE, manual, None)]
+        segs = [(-math.inf, pts[0][1], pts[0][0], pts[0][1], None)]
+        segs += [(t0, v0, t1, v1, c) for (t0, v0, c), (t1, v1, _) in zip(pts, pts[1:]) if t1 > t0]
+        segs.append((pts[-1][0], pts[-1][1], math.inf, pts[-1][1], None))
         self.segs = segs
+        self.curved = any(sg[4] for sg in segs)
+        self._whole: dict = {}
 
     @staticmethod
-    def _value(seg, x: float) -> float:
-        t0, v0, t1, v1 = seg
+    def _u(seg, x: float) -> float:
+        """Where along a curved segment's Bezier a beat falls."""
+        t0, _, t1, _, c = seg
+        frac = (x - t0) / (t1 - t0)
+        lo, hi = 0.0, 1.0
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            if _bez(c[0], c[2], mid) < frac:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2
+
+    @classmethod
+    def _value(cls, seg, x: float) -> float:
+        t0, v0, t1, v1, c = seg
         if math.isinf(t0) or math.isinf(t1):
             return v0
+        if c:
+            return v0 + (v1 - v0) * _bez(c[1], c[3], cls._u(seg, x))
         return v0 + (v1 - v0) * (x - t0) / (t1 - t0)
 
     def bpm_at(self, beat: float) -> float:
@@ -533,12 +896,35 @@ class LiveTempo:
             x, y = max(a, seg[0]), min(b, seg[2])
             if y <= x:
                 continue
+            if seg[4]:
+                if x == seg[0] and y == seg[2]:  # a whole curved segment: worked out once
+                    if seg not in self._whole:
+                        self._whole[seg] = self._curve_seconds(seg, x, y)
+                    total += self._whole[seg]
+                else:
+                    total += self._curve_seconds(seg, x, y)
+                continue
             vx, vy = self._value(seg, x), self._value(seg, y)
             if abs(vy - vx) < 1e-9:
                 total += (y - x) * 60 / vx
             else:
                 total += 60 * (y - x) * math.log(vy / vx) / (vy - vx)
         return total
+
+    def _curve_seconds(self, seg, x: float, y: float, steps: int = 400) -> float:
+        """Seconds across part of a curved segment: the integral of 60 / tempo over the beats,
+        taken along the Bezier's own parameter (Simpson's rule; the curve is smooth)."""
+        t0, v0, t1, v1, c = seg
+        ua, ub = self._u(seg, x), self._u(seg, y)
+        h = (ub - ua) / steps
+
+        def f(u):
+            return 60 * (t1 - t0) * _bez_d(c[0], c[2], u) / (v0 + (v1 - v0) * _bez(c[1], c[3], u))
+
+        total = f(ua) + f(ub)
+        for k in range(1, steps):
+            total += (4 if k % 2 else 2) * f(ua + k * h)
+        return total * h / 3
 
     def beat_at(self, seconds: float) -> float:
         lo, hi = 0.0, 64.0
@@ -651,7 +1037,18 @@ class LiveSet:
                            self.text[span[0]:span[1]])]
 
     def tempo(self) -> LiveTempo:
-        return LiveTempo(self._events(self.tempo_target), float(self._manual("Tempo")[1]))
+        """The tempo envelope, curves included."""
+        span = self._envelope(self.tempo_target)
+        events = []
+        if span:
+            for m in re.finditer(r"<FloatEvent ([^>]*)/>", self.text[span[0]:span[1]]):
+                at = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1)))
+                curve = None
+                if "CurveControl1X" in at:
+                    curve = tuple(float(at[k]) for k in ("CurveControl1X", "CurveControl1Y",
+                                                         "CurveControl2X", "CurveControl2Y"))
+                events.append((float(at["Time"]), float(at["Value"]), curve))
+        return LiveTempo(events, float(self._manual("Tempo")[1]))
 
     def sigs(self) -> list[tuple[float, int, int]]:
         ev = self._events(self.sig_target) or [(PRE, float(self._manual("TimeSignature")[1]))]
@@ -686,9 +1083,11 @@ class LiveSet:
 
     def write(self, path: str, locators: list[tuple[float, str]], tempo: list[tuple[float, float]] | None,
               sigs: list[tuple[float, int]] | None, manual_tempo: float | None = None,
-              manual_sig: int | None = None) -> None:
-        """Save a copy with the given locators and, if given, tempo and time signature events."""
+              manual_sig: int | None = None, lyrics: "LyricsEdit | None" = None) -> None:
+        """Save a copy with the given locators and, if given, tempo and time signature events and lyrics."""
         edits: list[tuple[int, int, str]] = [(*self.loc_span, self._locator_xml(locators))]
+        if lyrics is not None:
+            edits += self._lyrics_edits(lyrics)
         for target, kind, events in ((self.tempo_target, "FloatEvent", tempo), (self.sig_target, "EnumEvent", sigs)):
             if events is None:
                 continue
@@ -709,6 +1108,99 @@ class LiveSet:
         with open(tmp, "wb") as f:
             f.write(out)
         os.replace(tmp, path)
+
+    # -- lyrics: a MIDI track AbleSet reads, one clip per line, each clip named with its line
+
+    def tracks(self) -> list[tuple[str, int, int, str]]:
+        """(kind, start, end, name) of each track in the set's track list, in order."""
+        out = []
+        a = self.text.find("<Tracks>")
+        z = self.text.find("</Tracks>", a)
+        for m in re.compile(r"<(MidiTrack|AudioTrack|GroupTrack|ReturnTrack) Id=").finditer(self.text, a, z):
+            if out and m.start() < out[-1][2]:
+                continue  # inside the previous track
+            end = self.text.find(f"</{m.group(1)}>", m.start()) + len(m.group(1)) + 3
+            nm = re.compile(r'<EffectiveName Value="([^"]*)"').search(self.text, m.start(), end)
+            out.append((m.group(1), m.start(), end, html.unescape(nm.group(1)) if nm else ""))
+        return out
+
+    def lyrics_track(self) -> tuple[int, int, str] | None:
+        """The first MIDI track AbleSet reads as lyrics (its name has +LYRICS): (start, end, name)."""
+        for kind, a, z, name in self.tracks():
+            if kind == "MidiTrack" and "+LYRICS" in name:
+                return a, z, name
+        return None
+
+    def _clip_events(self, a: int, z: int) -> tuple[int, int]:
+        """The span of the arrangement clip list (MainSequencer) inside a MIDI track."""
+        k = self.text.find("<MainSequencer", a, z)
+        k = self.text.find("<ArrangerAutomation>", k, z)
+        e = self.text.find("<Events", k, z)
+        if k < 0 or e < 0:
+            raise SetError("couldn't find where a MIDI track keeps its arrangement clips")
+        if re.compile(r"<Events\s*/>").match(self.text, e):
+            return e, self.text.find(">", e) + 1
+        return e, _balanced_end(self.text, e, "Events")  # clips' own envelopes have Events lists inside
+
+    def clip_model(self) -> str:
+        """A MIDI clip to shape new ones on: one from this set if it has any, so the format matches the
+        Live that saved it; else one from the installed Live's own sets; else a built-in one."""
+        m = re.search(r'<MidiClip Id="\d+" Time="[^"]*">.*?</MidiClip>', self.text, re.S)
+        return m.group(0) if m else installed_clip_model()
+
+    def _lyrics_edits(self, ly: "LyricsEdit") -> list[tuple[int, int, str]]:
+        edits = []
+        found = self.lyrics_track()
+        model = self.clip_model()
+        if found:
+            a, z, _ = found
+            new_track = None
+        else:
+            midi = [t for t in self.tracks() if t[0] == "MidiTrack"]
+            if not midi:
+                raise SetError("this set has no MIDI track to make a lyrics track from. Add one MIDI track in "
+                               "Live, save, and try again")
+            src = self.text[midi[0][1]:midi[0][2]]
+            if ly.rename_first and _is_empty_track(src):  # a new set: Live's own empty MIDI track
+                a, z = midi[0][1], midi[0][2]
+                new_track = None
+                edits.append(self._rename_track(a, z, ly.track_name))
+            else:
+                new_track, next_id = _clone_track(src, self, ly.track_name)
+                edits.append(_next_pointee_edit(self, next_id))
+        if new_track is None:
+            es, ee = self._clip_events(a, z)
+            events = self.text[es:ee]
+            kept = []
+            for m in re.finditer(r'<MidiClip Id="(\d+)" Time="([^"]+)">.*?</MidiClip>', events, re.S):
+                t = float(m.group(2))
+                if ly.replace and ly.replace[0] - 1e-6 <= t < ly.replace[1] - 1e-6:
+                    continue  # the song's old lyrics, replaced
+                kept.append(m.group(0))
+            ids = [int(x) for x in re.findall(r'<MidiClip Id="(\d+)"', events)]
+            first = max(ids, default=-1) + 1
+            clips = [_clip_xml(model, first + i, *c) for i, c in enumerate(ly.clips)]
+            # In time order, as Live keeps them: clips listed out of order were in the file and didn't play
+            every = sorted(kept + clips, key=lambda c: float(re.search(r'Time="([^"]+)"', c).group(1)))
+            edits.append((es, ee, "<Events>" + "".join(every) + "</Events>"))
+        else:
+            track = new_track
+            m = re.search(r"<MainSequencer.*?<ArrangerAutomation>\s*(<Events\s*/>|<Events>.*?</Events>)", track, re.S)
+            clips = [_clip_xml(model, i, *c) for i, c in enumerate(sorted(ly.clips, key=lambda c: c[0]))]
+            track = track[:m.start(1)] + "<Events>" + "".join(clips) + "</Events>" + track[m.end(1):]
+            ret = [t for t in self.tracks() if t[0] == "ReturnTrack"]
+            at = ret[0][1] if ret else self.text.find("</Tracks>")
+            edits.append((at, at, track))
+        return edits
+
+    def _rename_track(self, a: int, z: int, name: str) -> tuple[int, int, str]:
+        k = self.text.find("<Name>", a, z)
+        e = self.text.find("</Name>", k, z)
+        block = self.text[k:e]
+        esc = html.escape(name, quote=True)
+        block = re.sub(r'<EffectiveName Value="[^"]*"', f'<EffectiveName Value="{esc}"', block, count=1)
+        block = re.sub(r'<UserName Value="[^"]*"', f'<UserName Value="{esc}"', block, count=1)
+        return (k, e, block)
 
     def _locator_xml(self, locators: list[tuple]) -> str:
         """The locator list. (beat, name, xml) keeps a locator already in the set exactly as it was,
@@ -766,6 +1258,179 @@ class LiveSet:
         if self.text[close - 1] == "/":  # <Envelopes />
             return (k, close + 1, f"<Envelopes>{env}</Envelopes>")
         return (close + 1, close + 1, env)
+
+
+@dataclass
+class LyricsEdit:
+    clips: list[tuple[float, float, str, int, int]]  # (start beat, end beat, line, numerator, denominator)
+    track_name: str = "Lyrics +LYRICS"
+    replace: tuple[float, float] | None = None  # onto a song: its old lyric clips in this range go
+    rename_first: bool = False  # a new set: Live's own empty MIDI track becomes the lyrics track
+
+
+# A Live 12 arrangement MIDI clip with nothing in it, the last resort when neither the set nor the
+# installed Live has a clip to copy the shape of.
+BUILTIN_CLIP = (
+    '<MidiClip Id="0" Time="0"><LomId Value="0" /><LomIdView Value="0" /><CurrentStart Value="0" />'
+    '<CurrentEnd Value="4" /><Loop><LoopStart Value="0" /><LoopEnd Value="4" /><StartRelative Value="0" />'
+    '<LoopOn Value="false" /><OutMarker Value="4" /><HiddenLoopStart Value="0" /><HiddenLoopEnd Value="4" />'
+    '</Loop><Name Value="" /><Annotation Value="" /><Color Value="16" /><LaunchMode Value="0" />'
+    '<LaunchQuantisation Value="0" /><TimeSignature><TimeSignatures><RemoteableTimeSignature Id="0">'
+    '<Numerator Value="4" /><Denominator Value="4" /><Time Value="0" /></RemoteableTimeSignature>'
+    '</TimeSignatures></TimeSignature><Envelopes><Envelopes /></Envelopes><ScrollerTimePreserver>'
+    '<LeftTime Value="0" /><RightTime Value="4" /></ScrollerTimePreserver><TimeSelection>'
+    '<AnchorTime Value="0" /><OtherTime Value="0" /></TimeSelection><Legato Value="false" />'
+    '<Ram Value="false" /><GrooveSettings><GrooveId Value="-1" /></GrooveSettings><Disabled Value="false" />'
+    '<VelocityAmount Value="0" /><FollowAction><FollowTime Value="4" /><IsLinked Value="true" />'
+    '<LoopIterations Value="1" /><FollowActionA Value="4" /><FollowActionB Value="0" />'
+    '<FollowChanceA Value="100" /><FollowChanceB Value="0" /><JumpIndexA Value="1" /><JumpIndexB Value="1" />'
+    '<FollowActionEnabled Value="false" /></FollowAction><Grid><FixedNumerator Value="1" />'
+    '<FixedDenominator Value="16" /><GridIntervalPixel Value="20" /><Ntoles Value="2" />'
+    '<SnapToGrid Value="true" /><Fixed Value="false" /></Grid><FreezeStart Value="0" />'
+    '<FreezeEnd Value="0" /><IsWarped Value="true" /><TakeId Value="1" /><IsInKey Value="true" />'
+    '<ScaleInformation><Root Value="0" /><Name Value="0" /></ScaleInformation>'
+    '<AutomationEnvelopesListWrapper LomId="0" /><Notes><KeyTracks /><PerNoteEventStore><EventLists />'
+    '</PerNoteEventStore><NoteProbabilityGroups /><ProbabilityGroupIdGenerator><NextId Value="1" />'
+    '</ProbabilityGroupIdGenerator><NoteIdGenerator><NextId Value="1" /></NoteIdGenerator></Notes>'
+    '<BankSelectCoarse Value="-1" /><BankSelectFine Value="-1" /><ProgramChange Value="-1" />'
+    '</MidiClip>')
+_installed_clip: list = []
+
+
+def installed_clip_model() -> str:
+    """An arrangement MIDI clip from a set inside the installed Live, so its shape matches that Live."""
+    if not _installed_clip:
+        model = BUILTIN_CLIP
+        for _, template in live_templates()[:1]:
+            res = template.split("Builtin")[0]
+            for path in sorted(glob.glob(os.path.join(res, "**", "*.als"), recursive=True))[:80]:
+                try:
+                    x = gzip.decompress(open(path, "rb").read()).decode("utf-8", "replace")
+                except (OSError, EOFError):
+                    continue
+                m = re.search(r'<MidiClip Id="\d+" Time="[^"]*">.*?</MidiClip>', x, re.S)
+                if m:
+                    model = m.group(0)
+                    break
+        _installed_clip.append(model)
+    return _installed_clip[0]
+
+
+def _clip_xml(model: str, cid: int, start: float, end: float, name: str, num: int, den: int) -> str:
+    """An empty arrangement MIDI clip from start to end, named with a lyric line."""
+    length = max(end - start, 0.25)
+    x = re.sub(r'^<MidiClip Id="\d+" Time="[^"]*">', f'<MidiClip Id="{cid}" Time="{_num(start)}">', model)
+    for tag, val in (("CurrentStart", start), ("CurrentEnd", start + length), ("LoopStart", 0),
+                     ("LoopEnd", length), ("StartRelative", 0), ("OutMarker", length),
+                     ("HiddenLoopStart", 0), ("HiddenLoopEnd", length)):
+        x = re.sub(rf'<{tag} Value="[^"]*"', f'<{tag} Value="{_num(val)}"', x, count=1)
+    x = re.sub(r'<LoopOn Value="[^"]*"', '<LoopOn Value="false"', x, count=1)
+    x = re.sub(r'<Name Value="[^"]*"', lambda m: '<Name Value="%s"' % html.escape(name, quote=True), x, count=1)
+    x = re.sub(r'<Annotation Value="[^"]*"', '<Annotation Value=""', x, count=1)
+    x = re.sub(r'<Numerator Value="[^"]*"', f'<Numerator Value="{num}"', x, count=1)
+    x = re.sub(r'<Denominator Value="[^"]*"', f'<Denominator Value="{den}"', x, count=1)
+    x = re.sub(r"<Envelopes>\s*(<Envelopes\s*/>|<Envelopes>.*?</Envelopes>)\s*</Envelopes>",
+               "<Envelopes><Envelopes /></Envelopes>", x, count=1, flags=re.S)
+    x = re.sub(r"<KeyTracks>.*?</KeyTracks>", "<KeyTracks />", x, count=1, flags=re.S)
+    x = re.sub(r"<EventLists>.*?</EventLists>", "<EventLists />", x, count=1, flags=re.S)
+    x = re.sub(r'<RightTime Value="[^"]*"', f'<RightTime Value="{_num(length)}"', x, count=1)
+    x = re.sub(r'<AnchorTime Value="[^"]*"', '<AnchorTime Value="0"', x, count=1)
+    x = re.sub(r'<OtherTime Value="[^"]*"', '<OtherTime Value="0"', x, count=1)
+    x = re.sub(r'<Disabled Value="[^"]*"', '<Disabled Value="false"', x, count=1)
+    return x
+
+
+def _clone_track(src: str, ls: "LiveSet", name: str) -> tuple[str, int]:
+    """A copy of one of the set's own MIDI tracks, emptied, for a new lyrics track.
+
+    Copying a track of this very set keeps everything Live expects in place (one send per return
+    track, the format of the Live that saved it). Emptied: no clips, no devices, no automation.
+    Every id Live points at (automation and modulation targets, pointees) is new, numbered from
+    the set's NextPointeeId, and the track gets the next track id.
+    """
+    t = _empty_all(src, "<ArrangerAutomation>", "Events")
+    t = _empty_all(t, "<TakeLanes>", "TakeLanes")  # take-lane clips, and their envelopes pointing into this track
+    t = re.sub(r'<Freeze Value="true"', '<Freeze Value="false"', t)
+    t = re.sub(r'<SelectedDevice Value="\d+"', '<SelectedDevice Value="0"', t)  # no devices left to point at
+    t = re.sub(r"<ClipSlot>\s*<Value>.*?</Value>\s*</ClipSlot>", "<ClipSlot><Value /></ClipSlot>", t, flags=re.S)
+    k = t.find("<DeviceChain>")
+    k = t.find("<DeviceChain>", k + 1)  # the track's own device chain, inside its mixer chain
+    d = t.find("<Devices", k)
+    if d >= 0:
+        if re.compile(r"<Devices\s*/>").match(t, d):
+            pass
+        else:
+            end = _balanced_end(t, d, "Devices")
+            t = t[:d] + "<Devices />" + t[end:]
+    t = re.sub(r"(<AutomationEnvelopes>\s*)(<Envelopes\s*/>|<Envelopes>.*?</Envelopes>)", r"\1<Envelopes />", t,
+               count=1, flags=re.S)
+    esc = html.escape(name, quote=True)
+    t = re.sub(r'<EffectiveName Value="[^"]*"', f'<EffectiveName Value="{esc}"', t, count=1)
+    t = re.sub(r'<UserName Value="[^"]*"', f'<UserName Value="{esc}"', t, count=1)
+    t = re.sub(r'<TrackGroupId Value="[^"]*"', '<TrackGroupId Value="-1"', t, count=1)
+    track_ids = [int(x) for x in re.findall(r'<(?:MidiTrack|AudioTrack|GroupTrack|ReturnTrack) Id="(\d+)"', ls.text)]
+    t = re.sub(r'^<MidiTrack Id="\d+"', f'<MidiTrack Id="{max(track_ids, default=0) + 1}"', t)
+    next_id = int(re.search(r'<NextPointeeId Value="(\d+)"', ls.text).group(1))
+    counter = [next_id]
+
+    def renumber(m):
+        counter[0] += 1
+        return f'<{m.group(1)} Id="{counter[0] - 1}"'
+
+    t = re.sub(POINTEE, renumber, t)
+    return t, counter[0]
+
+
+# Every element Live points at by number, and so whose number must be unique in the whole set:
+# automation and modulation targets of every kind, MIDI controller targets (ControllerTargets.0 to
+# .130 on each MIDI track: Live called a set reusing them "corrupt (non-unique Pointee IDs)"), and
+# pointees.
+POINTEE = re.compile(r'<([\w.]*Target[\w.]*|Pointee) Id="(\d+)"')
+
+
+def _is_empty_track(t: str) -> bool:
+    """No clips anywhere and no devices: safe to rename into a lyrics track."""
+    if "<MidiClip " in t:
+        return False
+    k = t.find("<DeviceChain>", t.find("<DeviceChain>") + 1)
+    return bool(re.compile(r"<Devices\s*/>").match(t, t.find("<Devices", k))) if k >= 0 else False
+
+
+def _empty_all(t: str, opener: str, tag: str) -> str:
+    """Every <tag> list right after opener emptied to <tag />, matched by nesting, not by the first
+    closing tag (a clip's envelope has its own Events list inside)."""
+    out, pos = [], 0
+    for m in re.finditer(re.escape(opener) + r"\s*", t):
+        if m.start() < pos:
+            continue
+        e = m.end()
+        if not t.startswith(f"<{tag}", e) or re.compile(rf"<{tag}\s*/>").match(t, e):
+            continue
+        end = _balanced_end(t, e, tag)
+        out.append((e, end))
+        pos = end
+    for a, z in reversed(out):
+        t = t[:a] + f"<{tag} />" + t[z:]
+    return t
+
+
+def _next_pointee_edit(ls: "LiveSet", value: int) -> tuple[int, int, str]:
+    m = re.search(r'<NextPointeeId Value="(\d+)"', ls.text)
+    return (m.start(1), m.end(1), str(value))
+
+
+def _balanced_end(text: str, start: int, tag: str) -> int:
+    """Where the element opening at start closes, counting nested ones of the same name."""
+    depth, i = 0, start
+    pat = re.compile(rf"<(/?){tag}(\s[^>]*?)?(/?)>")  # non-greedy, or "<Devices />" reads as an opening
+    for m in pat.finditer(text, start):
+        if m.group(1):
+            depth -= 1
+        elif not m.group(3):
+            depth += 1
+        if depth == 0:
+            return m.end()
+    raise SetError(f"the set's {tag} list doesn't close")
 
 
 # ---------------------------------------------------------------- songs in a set (AbleSet's reading)
@@ -843,6 +1508,7 @@ class Placed:
     left_out: list[Locator] = field(default_factory=list)
     replaced: int = 0  # section locators removed from a song already there
     gone: list = field(default_factory=list)  # (beat, name) of every locator taken out
+    lyric_clips: list = field(default_factory=list)  # (start, end, line, num, den) in the set
     worst: float = 0.0  # how far the set's tempo and the file's disagree, seconds
 
 
@@ -894,6 +1560,20 @@ def _verify(path: str, placed: list[Placed], wrote_tempo: bool) -> None:
     if len({l.id for l in ls.locators()}) != len(have):
         raise SetError("the saved set has two locators with the same number")
     tm = ls.tempo()
+    want = [c for p in placed for c in p.lyric_clips]
+    if want:
+        found = ls.lyrics_track()
+        if not found:
+            raise SetError("the saved set has no lyrics track")
+        es, ee = ls._clip_events(found[0], found[1])
+        have_clips = [(float(t), html.unescape(nm)) for t, nm in re.findall(
+            r'<MidiClip Id="\d+" Time="([^"]+)">.*?<Name Value="([^"]*)"', ls.text[es:ee], re.S)]
+        for a, _, text, _, _ in want:
+            if not any(abs(t - a) < 1e-6 and nm == text for t, nm in have_clips):
+                raise SetError(f"the saved set is missing the lyric line {text}")
+        ids = [m.group(2) for m in re.finditer(POINTEE, ls.text)]
+        if len(ids) != len(set(ids)):
+            raise SetError("the saved set has two automation targets with the same number")
     for p in placed:
         for beat, name in p.locators:
             if not any(abs(b - beat) < 1e-6 and nm == name for b, nm in have):
@@ -974,15 +1654,19 @@ def new_set(plans: list[SongPlan], out: str, template: str | None = None, dry_ru
         at = bar_at_or_after(cur_sigs, at)
         _append(p, at, tempo, sigs, tempo[-1][1])
         cur_sigs = [(max(t, 0.0), *sig_from_value(v)) for t, v in sigs]
-        placed.append(Placed(p, at, [(at + l.beat, l.name) for l in p.locators] + _tail(p, at), "tempo"))
+        pl = Placed(p, at, [(at + l.beat, l.name) for l in p.locators] + _tail(p, at), "tempo")
+        pl.lyric_clips = lyric_clips(p, at)
+        placed.append(pl)
         at += p.span_beat
     if dry_run:
         return Result("", placed, said)
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     if os.path.exists(out):
         raise SetError(f"{os.path.basename(out)} already exists there")
+    clips = [c for pl in placed for c in pl.lyric_clips]
+    ly = LyricsEdit(clips, rename_first=True) if clips else None
     ls.write(out, [loc for pl in placed for loc in pl.locators], tempo, sigs,
-             manual_tempo=plans[0].tempos[0][1], manual_sig=sig_value(*plans[0].sigs[0][1:]))
+             manual_tempo=plans[0].tempos[0][1], manual_sig=sig_value(*plans[0].sigs[0][1:]), lyrics=ly)
     try:
         _verify(out, placed, True)
     except SetError:
@@ -1016,8 +1700,8 @@ def add_to_set(set_path: str, plans: list[SongPlan], out: str | None = None, ont
         if len(plans) != 1:
             raise SetError("one MIDI file at a time can go onto a song already in the set")
         p = plans[0]
-        if not p.markers:
-            raise SetError(f"{os.path.basename(p.path)} has no markers, so there are no sections to put on {onto}. "
+        if not p.markers and not p.lyrics:
+            raise SetError(f"{os.path.basename(p.path)} has no markers or lyrics to put on {onto}. "
                            "Type some in")
         match = [(s, end) for s, end in set_songs(ls) if s.name == onto] or \
                 [(s, end) for s, end in set_songs(ls) if song_title(s.name).lower() == song_title(onto).lower()]
@@ -1035,10 +1719,6 @@ def add_to_set(set_path: str, plans: list[SongPlan], out: str | None = None, ont
             p.said = [x for x in p.said if not x.startswith("No end was typed")]  # the set says where it ends
             for l in p.locators:
                 l.seconds = tm.seconds(start + l.beat) - zero
-        span = ls._envelope(ls.tempo_target)
-        if span and "CurveControl" in ls.text[span[0]:span[1]]:
-            said.append("The set's tempo automation has curves. Comparing it with the file's tempo, they're "
-                        "counted as straight lines, so check how the markers line up by ear.")
         by_bars = [start + l.beat for l in p.locators]
         worst = max((abs((tm.seconds(b) - zero) - l.seconds) for b, l in zip(by_bars, p.locators)
                      if l.kind != "song"), default=0.0)
@@ -1083,8 +1763,27 @@ def add_to_set(set_path: str, plans: list[SongPlan], out: str | None = None, ont
 
         removed = [k for k in keep if replaceable(k[0], k[1])]
         keep = [k for k in keep if not replaceable(k[0], k[1])] + new
-        pl = Placed(p, start, new, how, left_out, len([r for r in removed if r[1].strip().startswith(">")]), worst,
-                    [(r[0], r[1]) for r in removed])
+        pl = Placed(p, start, new, how, left_out=left_out, worst=worst,
+                    replaced=len([r for r in removed if r[1].strip().startswith(">")]),
+                    gone=[(r[0], r[1]) for r in removed])
+        if p.lyrics:
+            # by bar, lines sit where the file has them; by time, each moves to its moment in the set
+            def place(b):
+                return start + b if how == "bars" else tm.beat_at(zero + _seconds(p.tempos, b))
+            # the song ends where the locators say: its SONG END in the set, else the next song
+            lim = limit if limit != math.inf else max(place(p.span_beat), place(p.end_beat))
+            clips, late = [], []
+            for a, e, text, nm, dn in lyric_clips(p, 0.0, limit=math.inf):
+                if place(a) >= lim - 1e-6:
+                    late.append(text)
+                    continue
+                clips.append((place(a), min(place(e), lim), text, nm, dn))
+            pl.lyric_clips = clips
+            pl.lyric_range = (start, song_end)
+            if late:
+                said.append(f"{n(len(late), 'lyric line')} came after where {song_title(song.name)} ends in the "
+                            f"set, so {'it was' if len(late) == 1 else 'they were'} left out: "
+                            + ", ".join(late) + ".")
         placed.append(pl)
         if left_out:
             one = len(left_out) == 1
@@ -1107,7 +1806,9 @@ def add_to_set(set_path: str, plans: list[SongPlan], out: str | None = None, ont
             _append(p, at, tempo_list, sig_list, prev)
             locs = [(at + l.beat, l.name) for l in p.locators] + _tail(p, at)
             keep += locs
-            placed.append(Placed(p, at, locs, "tempo"))
+            pl = Placed(p, at, locs, "tempo")
+            pl.lyric_clips = lyric_clips(p, at)
+            placed.append(pl)
             at += p.span_beat
         # The set's own tempo points stay exactly as written (curves and all); only new ones are added,
         # unless the set was empty and its starting tempo was replaced.
@@ -1132,7 +1833,16 @@ def add_to_set(set_path: str, plans: list[SongPlan], out: str | None = None, ont
         if os.path.exists(target):
             raise SetError(f"{os.path.basename(target)} already exists there")
     tmp_check = target + ".check"
-    ls.write(tmp_check, keep, tempo_events if wrote_tempo else None, sig_events if wrote_tempo else None)
+    clips = [c for pl in placed for c in pl.lyric_clips]
+    ly = None
+    if clips:
+        rng = getattr(placed[0], "lyric_range", None) if onto is not None else None
+        ly = LyricsEdit(clips, replace=rng)
+        found = ls.lyrics_track()
+        said.append(f"The lyrics go on {'the track ' + found[2] if found else 'a new track, Lyrics +LYRICS'}"
+                    + (", replacing the song's lines there." if rng and found else "."))
+    ls.write(tmp_check, keep, tempo_events if wrote_tempo else None, sig_events if wrote_tempo else None,
+             lyrics=ly)
     try:
         _verify(tmp_check, placed, wrote_tempo)
     except SetError:
@@ -1160,10 +1870,15 @@ def describe_plan(p: SongPlan) -> list[str]:
                                                if len(p.sigs) > 1 else "")
     lines = [head + f". {tempo}, {sig}."]
     lines += p.said
+    if p.lyrics:
+        lines.append(f"{n(len(p.lyrics), 'lyric line')} for AbleSet's lyrics track, listed after the locators.")
     for loc in p.locators:
         where = where_text(p.sigs, loc.beat, capital=True)
         lines.append(f"{where}: {loc.name}" + (" (where the music ends)" if loc.kind == "end" and
                                                 not p.end_from_marker else ""))
+    if p.lyrics:
+        lines.append("Lyrics:")
+        lines += [f"  {where_text(p.sigs, b, capital=True)}: {text}" for b, text in p.lyrics]
     return lines
 
 
@@ -1180,6 +1895,8 @@ def describe_result(r: Result) -> list[str]:
         line = f"{p.plan.name}: {n(len(p.locators), 'locator')}, {how}"
         if p.replaced:
             line += f", replacing {n(p.replaced, 'section locator')} that were there"
+        if p.lyric_clips:
+            line += f", and {n(len(p.lyric_clips), 'lyric line')} on the lyrics track"
         lines.append(line + ".")
         lines += p.plan.said
     return lines + r.said

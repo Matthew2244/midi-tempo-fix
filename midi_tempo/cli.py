@@ -12,6 +12,8 @@
     midi-tempo ableton song.mid --into Show.als --onto Song  ... onto a song already there
     midi-tempo ableton song.mid --marker "17 Verse" --marker "33.3 Hit"   ... plus markers typed in
     midi-tempo ableton --name Song --tempo 96 --markers list.txt         ... or typed in alone
+    midi-tempo ableton song.mid --lyrics       ... with the file's lyrics as an AbleSet lyrics track
+    midi-tempo ableton "My Song.RPP"           ... straight from a REAPER project, no MIDI export
     midi-tempo ableton --songs Show.als        list the songs in a set
 
 Checks the tempo map (doubled tempos, REAPER ramp notes, tempo on the wrong
@@ -173,17 +175,30 @@ def cmd_ableton(a) -> int:
                 print("Write the time signature like 4/4 or 6/8.")
                 return 2
         opts = dict(quick=a.quick, song_end=not a.no_song_end, plain=a.plain)
+        lyrics = None
+        if a.lyrics_text:
+            text = sys.stdin.read() if a.lyrics_text == "-" else open(a.lyrics_text, encoding="utf-8-sig").read()
+            lyrics = A.parse_markers(text)
+        elif a.lyrics:
+            if not files:
+                print("--lyrics reads a MIDI file's lyrics; with no file, type them with --lyrics-text.")
+                return 2
+            lyrics = "file"
+        if isinstance(lyrics, list) and len(files) > 1:
+            print("Typed lyrics go with one song at a time; give one MIDI file, or none.")
+            return 2
         if files:
             if a.name and len(files) > 1:
                 print("--name names one song; with several files each takes its file's name.")
                 return 2
             plans = [A.plan_song(f, a.name, project=a.project, typed=typed, file_markers=not a.no_file_markers,
-                                 **opts) for f in files]
+                                 lyrics=lyrics, **opts) for f in files]
         else:
             if not a.name and not a.onto:
                 print("Name the song with --name.")
                 return 2
-            plans = [A.plan_song(None, a.name or a.onto, typed=typed, tempo=a.tempo, signature=sig, **opts)]
+            plans = [A.plan_song(None, a.name or a.onto, typed=typed, tempo=a.tempo, signature=sig,
+                                 lyrics=lyrics if isinstance(lyrics, list) else None, **opts)]
         if a.preview:
             out = []
             for p in plans:
@@ -252,7 +267,8 @@ def main(argv: list[str] | None = None) -> int:
                     "at bar 1, \"> Verse\" for each section, and SONG END. The MIDI file's tempo map and time "
                     "signatures come too, so Live's bars match the song's. Markers can also be typed in, as many "
                     "as you like. Your files are never changed: a new set is saved, or a copy of yours.")
-    ab.add_argument("files", nargs="*", help="MIDI files. Several make one set with the songs back to back.")
+    ab.add_argument("files", nargs="*",
+                    help="MIDI files or REAPER projects (.rpp). Several make one set with the songs back to back.")
     ab.add_argument("--marker", action="append", metavar='"BAR[.BEAT] NAME"',
                     help='A marker typed in, like "17 Verse" or "33.3 Pickup" (bar 33, beat 3). Repeat it for more.')
     ab.add_argument("--markers", metavar="FILE",
@@ -260,7 +276,13 @@ def main(argv: list[str] | None = None) -> int:
                          "or a pipe.")
     ab.add_argument("--no-file-markers", action="store_true",
                     help="Leave out the MIDI file's own markers and use only the typed ones.")
-    ab.add_argument("--name", help="The song's name. Default: the MIDI file's name.")
+    ab.add_argument("--name", help="The song's name. Default: the file's name.")
+    ab.add_argument("--lyrics", action="store_true",
+                    help="Add the MIDI file's lyrics as a lyrics track AbleSet shows: one clip per line, on a track "
+                         "named Lyrics +LYRICS (or the set's own +LYRICS track).")
+    ab.add_argument("--lyrics-text", metavar="FILE",
+                    help="Lyrics typed in instead, one line each, like 17 First line of the song or 33.3 Next "
+                         "line. A dash reads them from the keyboard or a pipe.")
     ab.add_argument("--tempo", type=float, help="With no MIDI file: the song's tempo in BPM. Default 120.")
     ab.add_argument("--time", metavar="4/4", help="With no MIDI file: the time signature. Default 4/4.")
     ab.add_argument("--into", metavar="SET.als",

@@ -36,20 +36,30 @@ def marker_row(m: A.TypedMarker, source: str) -> str:
 class TextDialog(wx.Dialog):
     """Every marker as plain text, one per line: read it, edit it, paste a list in, or copy it out."""
 
-    def __init__(self, parent, text: str):
-        super().__init__(parent, title="Edit Markers as Text", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+    LYRICS_INTRO = ("One lyric line per line: the bar where it's sung, then a dot and the beat if it isn't the "
+                    "downbeat, then the words. Like 17 Here comes the morning, or 25.3 and the light gets in. "
+                    "Each becomes a clip on the lyrics track and shows in AbleSet when it's sung. What's here "
+                    "replaces the lyrics. Copy it out to keep it or share it.")
+
+    def __init__(self, parent, text: str, lyrics: bool = False):
+        title = "Edit Lyrics as Text" if lyrics else "Edit Markers as Text"
+        super().__init__(parent, title=title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         p = wx.Panel(self)
-        intro = wx.StaticText(p, label="One marker per line: the bar, then a dot and the beat if it isn't the "
-                                       "downbeat, then the name. Like 17 Verse, or 33.3 Pickup for bar 33, beat 3. "
-                                       "What's here replaces the list. Copy it out to keep it or share it.")
+        intro = wx.StaticText(p, label=self.LYRICS_INTRO if lyrics else (
+            "One marker per line: the bar, then a dot and the beat if it isn't the downbeat, then the name. "
+            "Like 17 Verse, or 33.3 Pickup for bar 33, beat 3. What's here replaces the list. Copy it out to "
+            "keep it or share it."))
         intro.Wrap(440)
-        label = wx.StaticText(p, label="&Markers")
-        self.text = wx.TextCtrl(p, value=text, style=wx.TE_MULTILINE, size=(460, 260), name="Markers")
-        self.text.SetHint("17 Verse\n33.3 Pickup\n49 Chorus +LOOP\n97 End")
+        what = "Lyrics" if lyrics else "Markers"
+        label = wx.StaticText(p, label=f"&{what}")
+        self.text = wx.TextCtrl(p, value=text, style=wx.TE_MULTILINE, size=(460, 260), name=what)
+        self.text.SetHint("17 Here comes the morning\n25.3 and the light gets in" if lyrics else
+                          "17 Verse\n33.3 Pickup\n49 Chorus +LOOP\n97 End")
         from .gui import mac_accessibility_label
-        mac_accessibility_label(self.text, "Markers")
+        mac_accessibility_label(self.text, what)
+        self.lyrics = lyrics
         cancel = wx.Button(p, wx.ID_CANCEL, "Cancel")  # made first: Tab goes in the order they're shown
-        ok = wx.Button(p, wx.ID_OK, "Use These Markers")
+        ok = wx.Button(p, wx.ID_OK, f"Use These {what}")
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(intro, 0, wx.ALL, 12)
         s.Add(label, 0, wx.LEFT | wx.RIGHT, 12)
@@ -118,9 +128,10 @@ class AbletonDialog(wx.Dialog):
 
         self.source = add("&Song from", wx.TextCtrl(p, style=wx.TE_READONLY, name="Song from"))
         src_buttons = wx.BoxSizer(wx.HORIZONTAL)
-        self.choose_midi = wx.Button(p, label="Choose MIDI File...")
-        self.choose_midi.SetToolTip("The MIDI file whose markers, tempo and time signatures make the song.")
-        self.no_midi = wx.Button(p, label="No MIDI File")
+        self.choose_midi = wx.Button(p, label="Choose MIDI File or REAPER Project...")
+        self.choose_midi.SetToolTip("The MIDI file or REAPER project whose markers, tempo and time signatures make "
+                                    "the song. A REAPER project needs no MIDI export, and its regions count too.")
+        self.no_midi = wx.Button(p, label="No File")
         self.no_midi.SetToolTip("Make the song from markers you type in, at a tempo and time signature you give.")
         src_buttons.Add(self.choose_midi, 0, wx.RIGHT, 8)
         src_buttons.Add(self.no_midi)
@@ -134,9 +145,9 @@ class AbletonDialog(wx.Dialog):
             self.songs_choice.SetSelection(0)
             self.songs_choice.SetToolTip("Typed markers go with one song at a time, so they're for Just this one.")
 
-        self.tempo = add("&Tempo, with no MIDI file", wx.TextCtrl(p, value="120", name="Tempo"))
+        self.tempo = add("&Tempo, with no file", wx.TextCtrl(p, value="120", name="Tempo"))
         self.tempo.SetToolTip("Beats per minute, 20 to 999.")
-        self.signature = add("Time si&gnature, with no MIDI file", wx.TextCtrl(p, value="4/4", name="Time signature"))
+        self.signature = add("Time si&gnature, with no file", wx.TextCtrl(p, value="4/4", name="Time signature"))
         self.signature.SetToolTip("Like 4/4 or 6/8.")
 
         self.name = add("Song &name", wx.TextCtrl(p, name="Song name"))
@@ -170,6 +181,17 @@ class AbletonDialog(wx.Dialog):
         self.add_btn = wx.Button(p, label="&Add Marker")
         self.add_btn.SetToolTip("Adds the marker typed above. Return in any of the three fields does the same.")
         s.Add(self.add_btn, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
+
+        # Lyrics: AbleSet shows them as they're sung, from a +LYRICS track with one clip per line
+        self.lyric_items: list[A.TypedMarker] = []
+        self.lyrics_cb = wx.CheckBox(p, label="Add a lyrics trac&k for AbleSet")
+        self.lyrics_cb.SetToolTip("One clip per line on a track named Lyrics +LYRICS, or on the set's own +LYRICS "
+                                  "track. The lines come from the MIDI file's lyrics, or type them in.")
+        s.Add(self.lyrics_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        self.lyrics_btn = wx.Button(p, label="Edit L&yrics as Text...")
+        self.lyrics_btn.SetToolTip("Every lyric line, one per line with its bar and beat, like 17 First line: "
+                                   "read them, fix them, paste them in or copy them out.")
+        s.Add(self.lyrics_btn, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
         self.editing = None  # the marker being changed (the object, not its row), while Change has it
 
         self.dest = add("&Put it in", wx.Choice(p, choices=["A new Live set", "A set I already have"],
@@ -241,6 +263,8 @@ class AbletonDialog(wx.Dialog):
         self.change_btn.Bind(wx.EVT_BUTTON, self.on_change)
         self.remove_btn.Bind(wx.EVT_BUTTON, self.on_remove)
         self.several_btn.Bind(wx.EVT_BUTTON, self.on_several)
+        self.lyrics_btn.Bind(wx.EVT_BUTTON, self.on_lyrics)
+        self.lyrics_cb.Bind(wx.EVT_CHECKBOX, self.on_option)
         self.choose_set.Bind(wx.EVT_BUTTON, self.on_choose_set)
         self.make.Bind(wx.EVT_BUTTON, self.on_make)
         self.list.Bind(wx.EVT_KEY_DOWN, self.on_list_key)
@@ -276,17 +300,27 @@ class AbletonDialog(wx.Dialog):
         if path:
             try:
                 file_items, _ = A.file_markers_typed(path)
-            except (MidiError, OSError) as e:
+            except (MidiError, OSError, ValueError) as e:
                 wx.MessageBox(f"{os.path.basename(path)} couldn't be read: {e}.", "Make an Ableton Set", wx.OK, self)
                 file_items = []
                 self.path = None
             self.items = [(m, "file") for m in file_items] + self.items
             self.items.sort(key=lambda x: (x[0].bar, x[0].beat))
-            self.source.SetValue(os.path.basename(path) if self.path else "No MIDI file: markers typed in only")
+            self.source.SetValue(os.path.basename(path) if self.path else "No file: markers typed in only")
+            # The file's lyrics, ready to use and to edit; the box is ticked when there are some
+            self.lyric_items, self.lyrics_said = [], []
+            if self.path and not A.is_rpp(self.path):
+                try:
+                    self.lyric_items, self.lyrics_said = A.file_lyrics_typed(self.path)
+                except (MidiError, OSError, ValueError):
+                    pass
+            self.lyrics_cb.SetValue(bool(self.lyric_items))
             if self.path:
                 self.name.ChangeValue(A.song_name_for(path))
         else:
-            self.source.SetValue("No MIDI file: markers typed in only")
+            self.source.SetValue("No file: markers typed in only")
+            self.lyric_items, self.lyrics_said = [], []  # nothing of the last file's stays behind
+            self.lyrics_cb.SetValue(False)
         self._loading = False
         self._fill()
 
@@ -315,11 +349,13 @@ class AbletonDialog(wx.Dialog):
                     plain=self.style.GetSelection() == 1)
         typed = [m for m, _ in self.items]
         which = self.songs_choice.GetSelection() if self.songs_choice else 0
+        want_lyrics = self.lyrics_cb.GetValue()
         if which and self.files:
-            return [A.plan_song(f, **opts) for f in self.files]
+            return [A.plan_song(f, lyrics="file" if want_lyrics else None, **opts) for f in self.files]
+        lyrics = list(self.lyric_items) if want_lyrics else None
         name = self.name.GetValue().strip() or None
         if self.path:
-            return [A.plan_song(self.path, name, typed=typed, file_markers=False, **opts)]
+            return [A.plan_song(self.path, name, typed=typed, file_markers=False, lyrics=lyrics, **opts)]
         try:
             tempo = float(self.tempo.GetValue().strip() or "120")
         except ValueError:
@@ -333,7 +369,7 @@ class AbletonDialog(wx.Dialog):
             name = A.song_title(onto)
         if not name:
             raise A.SetError("give the song a name")
-        return [A.plan_song(None, name, typed=typed, tempo=tempo, signature=(num, den), **opts)]
+        return [A.plan_song(None, name, typed=typed, tempo=tempo, signature=(num, den), lyrics=lyrics, **opts)]
 
     def _onto(self) -> str | None:
         if self.dest.GetSelection() != self.EXISTING or not self.live_set:
@@ -367,7 +403,7 @@ class AbletonDialog(wx.Dialog):
                 if c in self._labels:
                     self._labels[c].Show(on)
                 changed = True
-        for c in (self.add_btn, self.several_btn, self.list, self.m_bar, self.m_beat, self.m_name):
+        for c in (self.add_btn, self.several_btn, self.list, self.m_bar, self.m_beat, self.m_name, self.lyrics_btn):
             c.Enable(not several)
         label = f"Choose Set... ({os.path.basename(self.set_path)})" if self.set_path else "Choose Set..."
         if self.choose_set.GetLabel() != label:
@@ -408,7 +444,13 @@ class AbletonDialog(wx.Dialog):
         try:
             plans = self._plans()
             for p in plans:
-                lines += A.describe_plan(p) + [""]
+                desc = A.describe_plan(p)
+                extra = []
+                if len(plans) == 1 and self.lyrics_cb.GetValue():
+                    # where the lyrics came from, right under the song's first line
+                    extra = (list(getattr(self, "lyrics_said", []) or []) if self.lyric_items else
+                             ["No lyrics yet: Edit Lyrics as Text to type them in, or the lyrics track is left out."])
+                lines += desc[:1] + extra + desc[1:] + [""]
             if self.dest.GetSelection() == self.EXISTING and self.set_path:
                 lines += self._where_words(plans)
         except A.SetError as e:
@@ -454,8 +496,9 @@ class AbletonDialog(wx.Dialog):
         self._later()
 
     def on_choose_midi(self, _):
-        with wx.FileDialog(self, "Choose a MIDI file", defaultDir=self.cfg.Read("last_dir", ""),
-                           wildcard="MIDI files (*.mid;*.midi;*.smf)|*.mid;*.midi;*.smf;*.MID;*.MIDI|All files|*.*",
+        with wx.FileDialog(self, "Choose a MIDI file or a REAPER project", defaultDir=self.cfg.Read("last_dir", ""),
+                           wildcard="MIDI files and REAPER projects|*.mid;*.midi;*.smf;*.MID;*.MIDI;*.rpp;*.RPP;*.rpp-bak|"
+                                    "All files|*.*",
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as d:
             if d.ShowModal() != wx.ID_OK:
                 return
@@ -475,7 +518,7 @@ class AbletonDialog(wx.Dialog):
         if self.songs_choice:
             self.songs_choice.SetSelection(0)
             self.songs_choice.Disable()
-        self.main.tell("No MIDI file. Type the markers, tempo and time signature.")
+        self.main.tell("No file. Type the markers, tempo and time signature.")
         self.tempo.SetFocus()
 
     def _fonts(self, ctrls):
@@ -556,7 +599,13 @@ class AbletonDialog(wx.Dialog):
         if self.path:
             if getattr(self, "_sigs_for", None) != self.path:
                 said: list[str] = []
-                self._sigs = A._file_maps(A._music(self.path, None, said), said)[1]
+                try:
+                    if A.is_rpp(self.path):
+                        self._sigs = A._rpp_maps(self.path, said)[1]
+                    else:
+                        self._sigs = A._file_maps(A._music(self.path, None, said), said)[1]
+                except (MidiError, OSError, ValueError):
+                    return None
                 self._sigs_for = self.path
             return self._sigs
         try:
@@ -680,6 +729,36 @@ class AbletonDialog(wx.Dialog):
                                                    f", {abs(diff)} {'more' if diff > 0 else 'fewer'} than before.")
         self.main.SetStatusText(said)
         self._land(self.list if self.items else self.m_bar)
+        wx.CallLater(1400, lambda: self._say(said))
+
+    def on_lyrics(self, _):
+        before = len(self.lyric_items)
+        with TextDialog(self, "\n".join(A.marker_line(m) for m in self.lyric_items), lyrics=True) as d:
+            self._fonts(d.fonts)
+            d.Fit()
+            if d.ShowModal() != wx.ID_OK:
+                return
+            new = [m for m in d.result if m.text.strip()]
+        sigs = self._song_sigs() if not (self._onto() and not self.path) else None
+        if sigs:
+            for m in new:
+                try:
+                    A.resolve_marker(sigs, m)
+                except A.SetError as e:
+                    msg = str(e).replace("unnamed marker", "a line with no words")
+                    wx.MessageBox(msg[0].upper() + msg[1:] + ". Nothing was changed.", "Lyrics", wx.OK, self)
+                    return
+        self.lyric_items = sorted(new, key=lambda m: (m.bar, m.beat))
+        self.lyrics_said = [f"{len(self.lyric_items)} lyric lines, as edited."]
+        if self.lyric_items:
+            self.lyrics_cb.SetValue(True)
+        diff = len(self.lyric_items) - before
+        said = f"{len(self.lyric_items)} lyric lines now" + (
+            ", the same number as before." if diff == 0 else
+            f", {abs(diff)} {'more' if diff > 0 else 'fewer'} than before.")
+        self.main.SetStatusText(said)
+        self._later()
+        self._land(self.lyrics_btn)
         wx.CallLater(1400, lambda: self._say(said))
 
     def on_choose_set(self, _):

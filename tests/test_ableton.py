@@ -281,3 +281,164 @@ def test_awkward_names_survive_edit_as_text():
     ms = [A.TypedMarker(9, 1, "Beat 2 drop"), A.TypedMarker(10, 1, ": Chorus"), A.TypedMarker(11, 3, "- tag"),
           A.TypedMarker(12, 1, ".hidden")]
     assert A.parse_markers("\n".join(A.marker_line(m) for m in ms)) == ms
+
+
+# ---- REAPER projects as the source
+
+RPP = """<REAPER_PROJECT 0.1 "7.0/macOS-arm64" 1700000000
+  TEMPO 120 4 4 0
+  <TEMPOENVEX
+    ACT 1 -1
+    PT 0 120 1 262148 0 1
+    PT 8 120 0
+    PT 16 60 1
+    PT 20 60 1 262147 0 1
+  >
+  MARKER 1 0 Intro 0 0 1 B {A} 0
+  MARKER 2 4 "Verse 1" 0 0 1 B {B} 0
+  MARKER 3 10 'Pre "chorus"' 1 0 1 B {C} 0
+  MARKER 3 14 "" 1 0 1 B {C} 0
+  MARKER 4 30 =END 0 0 1 B {D} 0
+  <TRACK
+    <ITEM
+      POSITION 0
+      LENGTH 31
+    >
+  >
+>
+"""
+
+
+def test_a_reaper_project_makes_the_song_without_a_midi_export(tmp_path):
+    p = tmp_path / "My Song.RPP"
+    p.write_text(RPP)
+    plan = A.plan_song(str(p))
+    assert plan.name == "My Song"
+    names = [(round(l.beat, 6), l.name) for l in plan.locators]
+    # 120 BPM for 8 s is 16 beats; a region's start is a section and its end isn't; =END is SONG END
+    assert names[:3] == [(0, "My Song"), (0, "> Intro"), (8, "> Verse 1")]
+    assert names[3][1] == '> Pre "chorus"' and names[-1][1] == "SONG END"
+    # 8 s to 16 s ramps 120 to 60, linear in time: (120 + 60) / 120 * 8 = 12 beats
+    assert plan.locators[3].beat == pytest.approx(16 + A.rpp_beat_at_seconds([(0, 120, 1), (8, 120, 0), (16, 60, 1)], 10) - 16)
+    for loc in plan.locators:  # every locator plays when REAPER plays its marker
+        assert A._seconds(plan.tempos, loc.beat) == pytest.approx(
+            {"My Song": 0, "> Intro": 0, "> Verse 1": 4, '> Pre "chorus"': 10, "SONG END": 30}[loc.name], abs=1e-3)
+    assert plan.sigs[0][1:] == (4, 4) and any(sg[1:] == (3, 4) for sg in plan.sigs)
+
+
+def test_reaper_start_marker_moves_the_song_start(tmp_path):
+    p = tmp_path / "s.rpp"
+    p.write_text(RPP.replace("MARKER 1 0 Intro", "MARKER 9 2 =START 0 0 1 B {E} 0\n  MARKER 1 2 Intro"))
+    plan = A.plan_song(str(p))
+    assert [l.name for l in plan.locators][:2] == ["s", "> Intro"]
+    assert plan.locators[1].beat == pytest.approx(0)
+
+
+# ---- lyrics
+
+def lyric(s):
+    return text(s, kind=5)
+
+
+def test_lyrics_come_from_one_track_with_words_joined(tmp_path):
+    lead = [(0, lyric("Pa")), (PPQ // 2, lyric("tience... ")), (4 * PPQ, lyric("You ")), (5 * PPQ, lyric("can ")),
+            (6 * PPQ, lyric("make ")), (7 * PPQ, lyric("it! ")), (16 * PPQ, lyric("Be ")), (17 * PPQ, lyric("pa")),
+            (17 * PPQ + PPQ // 2, lyric("tient! "))]
+    harmony = [(0, lyric("Ooh "))]
+    m = tmp_path / "Song.mid"
+    m.write_bytes(smf([track([(0, tempo(120)), (0, timesig(4, 2)), (0, text("Lead", 3))] + lead),
+                       track([(0, text("Harmony", 3))] + harmony)]))
+    lines, said = A.file_lyrics_typed(str(m))
+    assert [(x.bar, x.beat, x.text) for x in lines] == [(1, 1, "Patience..."), (2, 1, "You can make it!"),
+                                                         (5, 1, "Be patient!")]
+    assert "Lead" in said[0] and "Harmony" in said[1]
+
+
+def test_karaoke_text_events_and_unmarked_syllables(tmp_path):
+    kar = [(0, text("@TSong")), (0, text("/Hel")), (PPQ, text("lo ")), (2 * PPQ, text("world ")),
+           (8 * PPQ, text("/Sec")), (9 * PPQ, text("ond "))]
+    m = tmp_path / "k.kar"
+    m.write_bytes(smf([track([(0, tempo(120))] + kar)]))
+    lines, _ = A.file_lyrics_typed(str(m))
+    assert [x.text for x in lines] == ["Hello world", "Second"]
+    plain = [(0, lyric("lie")), (PPQ, lyric("ben")), (2 * PPQ, lyric("Gott."))]
+    m2 = tmp_path / "u.mid"
+    m2.write_bytes(smf([track([(0, tempo(120))] + plain)]))
+    lines, said = A.file_lyrics_typed(str(m2))
+    assert lines[0].text == "lie ben Gott." and any("doesn't mark where words end" in x for x in said)
+
+
+MIDI_TRACK = """<MidiTrack Id="7"><Name><EffectiveName Value="1-MIDI" /><UserName Value="" /></Name>
+<TrackGroupId Value="-1" /><AutomationEnvelopes><Envelopes /></AutomationEnvelopes>
+<DeviceChain><Mixer><Volume><AutomationTarget Id="900"><LockEnvelope Value="0" /></AutomationTarget></Volume></Mixer>
+<MainSequencer><ClipSlotList /><ClipTimeable><ArrangerAutomation><Events /></ArrangerAutomation></ClipTimeable>
+<ControllerTargets.0 Id="901"><LockEnvelope Value="0" /></ControllerTargets.0></MainSequencer>
+<DeviceChain><Devices /></DeviceChain></DeviceChain></MidiTrack>"""
+
+
+def test_lyrics_track_in_a_new_set_and_a_copied_one(tmp_path):
+    tmpl = live_set(tmp_path / "T.als", extra=MIDI_TRACK)
+    plan = A.plan_song(None, "Song", typed=A.parse_markers("1 Intro\n9 End"),
+                       lyrics=A.parse_markers("2 First line\n3.3 Second line"))
+    r = A.new_set([plan], str(tmp_path / "New.als"), tmpl)
+    ls = A.LiveSet.load(r.path)
+    a, z, name = ls.lyrics_track()
+    assert name == "Lyrics +LYRICS"
+    events = ls.text[slice(*ls._clip_events(a, z))]
+    assert '<MidiClip Id="0" Time="4">' in events and '<Name Value="First line"' in events
+    assert '<MidiClip Id="1" Time="10">' in events and '<CurrentEnd Value="' in events
+    # a set without a lyrics track gets a copy of its own MIDI track, with new ids for everything Live points at
+    show = live_set(tmp_path / "Show.als", [(0, "Opener", "")], extra=MIDI_TRACK, clip_end=8)
+    r2 = A.add_to_set(show, [A.plan_song(None, "Two", typed=A.parse_markers("1 Intro\n5 End"),
+                                         lyrics=A.parse_markers("1 Hello there"))])
+    ls2 = A.LiveSet.load(r2.path)
+    assert [t[3] for t in ls2.tracks() if t[0] == "MidiTrack"] == ["1-MIDI", "Lyrics +LYRICS"]
+    ids = [m.group(2) for m in A.POINTEE.finditer(ls2.text)]
+    assert len(ids) == len(set(ids)) and "901" in ids and ids.count("901") == 1
+    assert int(__import__("re").search(r'NextPointeeId Value="(\d+)"', ls2.text).group(1)) > max(map(int, ids))
+
+
+def test_lyric_clips_are_kept_in_time_order(tmp_path):
+    tmpl = live_set(tmp_path / "T.als", extra=MIDI_TRACK)
+    late = A.plan_song(None, "Late", typed=A.parse_markers("1 A\n9 End"), lyrics=A.parse_markers("5 Late line"))
+    first = A.new_set([late], str(tmp_path / "S.als"), tmpl)
+    s2 = A.add_to_set(first.path, [A.plan_song(None, "Late", typed=A.parse_markers("2 B"),
+                                              lyrics=A.parse_markers("2 Early line"))], onto="Late",
+                      out=str(tmp_path / "S2.als"))
+    ls = A.LiveSet.load(s2.path)
+    times = [float(t) for t in __import__("re").findall(r'<MidiClip Id="\d+" Time="([^"]+)"',
+                                                         ls.text[slice(*ls._clip_events(*ls.lyrics_track()[:2]))])]
+    assert times == sorted(times) and len(times) == 1  # the song's old line was replaced
+
+
+# ---- curved tempo
+
+def test_a_curve_on_the_straight_line_is_a_ramp_and_others_are_not():
+    straight = A.LiveTempo([(A.PRE, 120), (0, 120, (1 / 3, 1 / 3, 2 / 3, 2 / 3)), (32, 60)], 120)
+    ramp = A.LiveTempo([(A.PRE, 120), (0, 120), (32, 60)], 120)
+    assert straight.seconds(32) == pytest.approx(ramp.seconds(32), abs=1e-6)
+    # Live played this one (curve c3 in HANDOFF) in 7.740 s from beat 2 to 16; straight lines say 8.190
+    c3 = A.LiveTempo([(A.PRE, 120), (0, 120, (0.5, 0.0, 0.5, 1.0)), (32, 60)], 120)
+    assert c3.seconds(16) - c3.seconds(2) == pytest.approx(7.7385, abs=0.001)
+
+
+def test_review_fixes_for_lyrics_and_reaper(tmp_path):
+    # a rack with an empty chain: <Devices /> inside <Devices> must not read as an opening tag
+    t = "<Devices><Rack><Devices /></Rack></Devices>tail"
+    assert t[A._balanced_end(t, 0, "Devices"):] == "tail"
+    # lyric lines past the song's end are left out and named; none runs into the next song
+    plan = A.plan_song(None, "S", typed=A.parse_markers("1 A\n3 End"),
+                       lyrics=A.parse_markers("1 In the song\n2.3 Still in\n4 Too late"))
+    clips = A.lyric_clips(plan, 0.0)
+    assert [c[2] for c in clips] == ["In the song", "Still in"] and all(c[1] <= 8 for c in clips)
+    assert any("Too late" in x for x in plan.said)
+    # REAPER: a backup copy reads as a project, a marker after =END is left out, the name is kept whole
+    p = tmp_path / "Song - tempo map and MIDI.rpp-bak"
+    p.write_text(RPP.replace("MARKER 4 30 =END", "MARKER 5 40 After 0 0 1 B {F} 0\n  MARKER 4 30 =END"))
+    pl = A.plan_song(str(p))
+    assert pl.name == "Song - tempo map and MIDI.rpp-bak".rsplit(".", 1)[0]
+    assert "> After" not in [l.name for l in pl.locators] and any("After" in x for x in pl.said)
+    empty = tmp_path / "empty.rpp"
+    empty.write_text("")
+    with pytest.raises(A.SetError, match="empty"):
+        A.plan_song(str(empty))
