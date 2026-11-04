@@ -151,7 +151,8 @@ class AbletonDialog(wx.Dialog):
         self.signature.SetToolTip("Like 4/4 or 6/8.")
 
         self.name = add("Song &name", wx.TextCtrl(p, name="Song name"))
-        self.name.SetToolTip("The song locator's name: what AbleSet shows in the setlist.")
+        self.name.SetToolTip("The song locator's name: what AbleSet shows in the setlist. It goes at the very start of the "
+                              "song on its own, so it isn't one of your markers. An Intro on bar 1 shares that spot.")
 
         self.list = add("&Markers", wx.ListBox(p, style=wx.LB_SINGLE, size=(-1, 170), name="Markers"))
         mac_accessibility_label(self.list, "Markers")
@@ -177,7 +178,8 @@ class AbletonDialog(wx.Dialog):
         self.m_beat = add("B&eat", wx.TextCtrl(p, value="1", style=wx.TE_PROCESS_ENTER, name="Beat"))
         self.m_beat.SetToolTip("1 is the downbeat. Halfway to beat 3 is 2.5.")
         self.m_name = add("Marker na&me", wx.TextCtrl(p, style=wx.TE_PROCESS_ENTER, name="Marker name"))
-        self.m_name.SetToolTip("Like Verse 2. End marks where the song stops. Return adds it.")
+        self.m_name.SetToolTip("Like Verse 2. Put each one where that part starts, an Intro too, even on bar 1. End marks "
+                                 "where the song stops. Return adds it.")
         self.add_btn = wx.Button(p, label="&Add Marker")
         self.add_btn.SetToolTip("Adds the marker typed above. Return in any of the three fields does the same.")
         s.Add(self.add_btn, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)

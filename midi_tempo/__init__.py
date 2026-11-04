@@ -1,2 +1,2 @@
 """Check and fix MIDI tempo maps so every app plays them the same."""
-__version__ = "1.9.1"
+__version__ = "1.9.2"

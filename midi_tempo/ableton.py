@@ -1874,8 +1874,9 @@ def describe_plan(p: SongPlan) -> list[str]:
         lines.append(f"{n(len(p.lyrics), 'lyric line')} for AbleSet's lyrics track, listed after the locators.")
     for loc in p.locators:
         where = where_text(p.sigs, loc.beat, capital=True)
-        lines.append(f"{where}: {loc.name}" + (" (where the music ends)" if loc.kind == "end" and
-                                                not p.end_from_marker else ""))
+        note = (" (the song's name, where the song starts)" if loc.kind == "song" else
+                " (where the music ends)" if loc.kind == "end" and not p.end_from_marker else "")
+        lines.append(f"{where}: {loc.name}{note}")
     if p.lyrics:
         lines.append("Lyrics:")
         lines += [f"  {where_text(p.sigs, b, capital=True)}: {text}" for b, text in p.lyrics]

@@ -52,6 +52,13 @@ You can also compare against a REAPER project (.rpp), which reads the project's 
 
 Write the song anywhere, put markers where the sections start, and export MIDI. **Make Ableton Set** (Command-L or Control-L) turns it into a Live set with a locator at every marker, named the way [AbleSet](https://ableset.com) reads them: the song's name at bar 1, "> Verse" for each section, and SONG END where it stops. The file's tempo map and time signatures come too, so Live's bars land where the song's do.
 
+**The song's name isn't one of your markers.** It's taken from the file name (or typed in Song name) and always goes at the very start of the song. Put every marker, an Intro included, where that part really starts:
+
+- If the intro starts on bar 1, put Intro on bar 1. The song's name and "> Intro" both sit there, and that's fine: one says where the song starts, the other names the section you're in.
+- If there's a count-in, a pickup or a few empty bars first, put Intro where the playing starts. The song still starts at the top, so a jump to the song plays the count-in too.
+
+You never need to leave room for the song's name or move a marker for it.
+
 - **Markers from the file, typed in, or both.** Every marker is listed by bar and beat ("Bar 33, beat 3: Pickup"). Add as many more as you like: type the bar, the beat and the name, then press Return, and you're back on Bar for the next one. **Edit as Text** shows every marker as one line each, like `17 Verse` or `33.3 Pickup`, to edit them all at once, paste in a list, or copy them out to keep. No MIDI file at all works too: give the tempo and time signature and type the markers.
 - **A new set, or one you already have.** A new set starts from the empty set inside your installed Live (if Live is somewhere unusual, you choose a set to start from once, and it's remembered). Several MIDI files make one set with the songs back to back, or one set each for AbleSet's multi-file projects. In a set you already have, a song goes after the last one with its tempo map, or onto a song already there, replacing that song's section locators and leaving its tempo alone. When the set's tempo and the file's disagree, you choose how the markers line up: by bar (the set is sped up or slowed down on purpose) or by time (stems that aren't warped).
 - **Your files are never changed.** A set you already have is saved as a copy named "(markers added)" unless you choose to update it, and then the old one is kept as "(before markers)". Every set is read back and checked before it's kept: each locator where it should be, and with the tempo map written, each one playing at its marker's moment to the millisecond.
