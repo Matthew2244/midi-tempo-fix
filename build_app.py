@@ -67,7 +67,10 @@ if sys.platform == "darwin":
     # MIDI files can be dropped on the app or opened with it
     subprocess.run(["plutil", "-insert", "CFBundleDocumentTypes", "-json",
                     '[{"CFBundleTypeName":"MIDI file","CFBundleTypeRole":"Viewer",'
-                    '"LSItemContentTypes":["public.midi-audio"],"LSHandlerRank":"Alternate"}]', plist], check=True)
+                    '"LSItemContentTypes":["public.midi-audio"],"LSHandlerRank":"Alternate"},'
+                    # REAPER projects, dropped on the Dock icon, open Make Ableton Set
+                    '{"CFBundleTypeName":"REAPER project","CFBundleTypeRole":"Viewer",'
+                    '"CFBundleTypeExtensions":["rpp","RPP"],"LSHandlerRank":"Alternate"}]', plist], check=True)
     if SIGN_ID:
         # PyInstaller already signed every binary inside; seal the bundle with the
         # hardened runtime and a secure timestamp, both required for notarization.

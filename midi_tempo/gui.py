@@ -188,7 +188,7 @@ class FileDrop(wx.FileDropTarget):
         self.frame = frame
 
     def OnDropFiles(self, x, y, filenames):
-        self.frame.check(filenames)
+        wx.CallAfter(self.frame.open_paths, list(filenames))  # after the drop finishes, so a window can open
         return True
 
 
@@ -500,23 +500,41 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
-    def on_ableton(self, _=None):
-        """Markers to Live locators. Starts from the file selected in the Files list, else the files checked."""
+    def open_paths(self, paths: list[str]):
+        """Dropped or opened files: MIDI files and folders are checked; a REAPER project opens Make Ableton
+        Set with it, since that's the one thing this app does with a project on its own."""
+        from . import ableton as A
+        projects = [p for p in paths if os.path.isfile(p) and A.is_rpp(p)]
+        rest = [p for p in paths if p not in projects]
+        if rest:
+            self.check(rest)
+        elif projects:
+            self.on_ableton(files=projects)
+
+    def on_ableton(self, _=None, files: list[str] | None = None):
+        """Markers to Live locators. Starts from the file selected in the Files list, else the files checked,
+        or from the files given (a REAPER project dropped on the window)."""
         if self.busy:
             return
         from .ableton_gui import AbletonDialog
         from . import ableton as A
 
+        if files is not None:
+            with AbletonDialog(self, files) as d:
+                return self._ableton_done(d, A)
         files = list(self.files)
         i = self.list.GetSelection()
         if 0 <= i < len(self.entries) and self.entries[i][1] is not None:
             first = self.entries[i][0]
             files = [first] + [f for f in files if f != first]
         with AbletonDialog(self, files) as d:
-            if d.ShowModal() != wx.ID_OK or not d.result:
-                self.SetFocus()
-                return
-            results = d.result
+            return self._ableton_done(d, A)
+
+    def _ableton_done(self, d, A):
+        if d.ShowModal() != wx.ID_OK or not d.result:
+            self.SetFocus()
+            return
+        results = d.result
         lines = []
         for r in results:
             lines += A.describe_result(r) + [""]
@@ -996,7 +1014,7 @@ class App(wx.App):
             winsparkle.start(lambda: wx.CallAfter(self.frame.Close))
         files = [a for a in sys.argv[1:] if not a.startswith("-")]
         if files:
-            self.frame.check(files)
+            wx.CallAfter(self.frame.open_paths, files)
         return True
 
     def OnExit(self):
@@ -1004,7 +1022,7 @@ class App(wx.App):
         return 0
 
     def MacOpenFiles(self, filenames):  # files dropped on the Dock icon or opened with the app
-        self.frame.check(list(filenames))
+        self.frame.open_paths(list(filenames))
 
 
 def main():

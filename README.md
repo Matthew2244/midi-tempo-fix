@@ -4,6 +4,8 @@ You save a MIDI file in one app, open it in another, and the notes drift away fr
 
 ![MIDI Tempo Fix on a Mac after comparing a piano part with a full mix. The Files list shows "Clean: Piano part.mid". The report starts with "Piano part.mid compared with Full mix.wav" in bold, then: "Does NOT line up with Full mix.wav. 0:05 to 0:26: lines up. At 0:30 (bar 16, beat 1), the timing jumps 248 ms: from there the audio is 251 ms behind the MIDI. 0:30 to 1:34: the audio is 251 ms behind the MIDI throughout." It ends by saying the tempo matches but time was added or removed, and suggests comparing with the REAPER project. Buttons along the bottom: Fix and save cleaned copies, Show cleaned files, Compare with another file, Make Ableton Set, Stop.](docs/screenshot.png)
 
+It also turns a song's markers, straight from a MIDI file or a REAPER project, into an Ableton Live set for [AbleSet](https://ableset.com), lyrics track included.
+
 It runs on Mac and Windows, as an app or from the command line. Everything works with VoiceOver, NVDA, JAWS and Narrator, and just as well with a mouse.
 
 ## What goes wrong
@@ -60,7 +62,7 @@ Write the song anywhere, put markers where the sections start, and export MIDI. 
 
 **Lyrics for AbleSet.** Tick "Add a lyrics track for AbleSet" and the song's lyrics become a lyrics track: one clip per line, on a track named "Lyrics +LYRICS" (or the set's own +LYRICS track), so AbleSet shows each line as it's sung. They come from the MIDI file's lyrics (most notation apps and karaoke files carry them) or you type them in. **Edit Lyrics as Text** shows every line with its bar and beat, like `78 Patience...`, to read, fix, paste or copy. When a file has lyrics on several tracks (a lead and harmonies), the one with the most is used and the others are named. Where a file doesn't say where words end, syllables are kept apart by spaces for you to join.
 
-Markers can carry AbleSet's own notation straight from your DAW: "> Chorus +LOOP", "SONG END", "* note to self" all go through as written. Only AbleSet's capitals count as commands, so a section your band calls "Stop" stays a section and never stops the show. A marker called End, as the last marker, becomes SONG END. From REAPER, export with File, Export project MIDI, and set "Export project markers as MIDI" to markers.
+Markers can carry AbleSet's own notation straight from your DAW: "> Chorus +LOOP", "SONG END", "* note to self" all go through as written. Only AbleSet's capitals count as commands, so a section your band calls "Stop" stays a section and never stops the show. A marker called End, as the last marker, becomes SONG END. From REAPER, choose the project itself (above); if you'd rather send a MIDI file, export with File, Export project MIDI and set "Export project markers as MIDI" to markers.
 
 For Live on its own, **Locator names** can be just the marker names, with no song name and no SONG END.
 
@@ -78,19 +80,19 @@ Get the latest version from the [Releases page](../../releases):
 
 ## Using the app
 
-1. Press **Choose MIDI files** (Command-O on Mac, Control-O on Windows) and pick one or more files, or **Choose a folder** (Command-Shift-O or Control-Shift-O) to check every MIDI file in it, including folders inside it. You can also drop files or folders on the window, or on the app's Dock icon on a Mac.
+1. Press **Choose MIDI files** (Command-O on Mac, Control-O on Windows) and pick one or more files, or **Choose a folder** (Command-Shift-O or Control-Shift-O) to check every MIDI file in it, including folders inside it. You can also drop files or folders on the window, or on the app's Dock icon on a Mac. Drop a REAPER project (.RPP) instead and Make Ableton Set opens with it.
 2. The **Files** list shows every file with its status first ("Needs fixing: name, what's wrong" or "Clean: name"), files that need fixing at the top. Arrow through it to hear each verdict, and select a file to read everything about it in the report.
 3. The report starts with the answer: each file is either "clean" or "needs fixing", with the problems named. The details follow. With more than one file, a summary line comes first ("Checked 40 files: 3 need fixing, 37 clean"). With more than 20, only the files that need fixing are listed, so the report stays short enough to listen to. Focus moves to the report, so your screen reader reads it right away. Big folders are checked in the background on every processor core (a 5,000-file library takes about four seconds on a recent Mac), with a progress bar, progress in the title bar, and the count spoken now and then. **Stop** (or Escape) ends a batch early and keeps the results so far.
 4. If something needs fixing, press **Fix and save cleaned copies** (Command-S or Control-S). The report says where each copy went, and **Show cleaned files** (Command-Shift-S or Control-Shift-S) opens that folder with them selected.
 5. **Compare with another file** (Command-R or Control-R) compares the chosen files with a recording, any other MIDI file, or a REAPER project. A recording takes a few seconds per file; the window says so while it listens, and Escape stops.
-6. **Make Ableton Set** (Command-L or Control-L) makes a Live set from the selected file's markers, or markers you type in. See above. **File, Show the Last Ableton Set** (Command-Shift-L or Control-Shift-L) shows the set it saved.
+6. **Make Ableton Set** (Command-L or Control-L) makes a Live set from the selected file's markers, a REAPER project, or markers you type in, with a lyrics track if you want one. See above. **File, Open the Last Ableton Set in Live** opens the set it saved, and **File, Show the Last Ableton Set** (Command-Shift-L or Control-Shift-L) shows it in its folder.
 7. **Copy report** (Command-Shift-C or Control-Shift-C) puts the whole report on the clipboard, ready to paste into a message. **File, Save report as text** saves it as a file. **Help, MIDI Tempo Fix Help** opens this page.
 
 **Bigger text:** View, Bigger Text (Command-equals or Control-equals) makes the list, report, labels and checkbox larger; Smaller Text and Actual Size undo it. The size is remembered. Verdicts and summaries are bold, so the answer stands out by weight as well as by words; nothing relies on colour.
 
 When a long batch finishes, the app plays a sound and bounces its Dock icon, in case you've switched to something else.
 
-The app remembers whether notes are checked, your text size, and which folder you last chose files from.
+The app remembers whether notes are checked, your text size, which folder you last chose files from, and your Make Ableton Set choices (locator names, quick-jump sections, SONG END, and the set you last added to).
 
 **Updates:** once a day the app asks GitHub whether there's a newer version, and the title bar and the report say so if there is. Nothing pops up. **Help, Check for Updates** opens the update window, with what's new and Install. On a Mac and in an installed Windows copy that's Sparkle (WinSparkle on Windows), and every update is signed, so a copy only installs what was really released here. A Windows copy run from the zip downloads the new version, checks that it starts, and replaces itself. Nothing else is sent anywhere.
 
@@ -136,6 +138,8 @@ Output is plain sentences, printed once per command, so a screen reader doesn't 
 
 Before each release it runs against more than 17,000 real MIDI files from many apps and libraries, and thousands of deliberately broken ones. The recording check is tested on synthetic songs with known offsets, jumps and tempo changes, and on real songs whose answers were measured by hand. Every cleaned copy has to pass its own read-back check, compare as identical to the original apart from what was fixed, and have nothing left to fix.
 
+Make Ableton Set was checked in Live 12 with AbleSet running, by reading back what AbleSet sees: every song length to the millisecond, every section on its beat, and every lyric line where it's sung. Sets made from REAPER projects were compared with REAPER's own MIDI exports, and more than a thousand real projects were read without an error. Every set it saves is read back and checked before it's kept.
+
 ## Building it yourself
 
 ```
@@ -144,7 +148,7 @@ python -m pytest
 python build_app.py
 ```
 
-`build_app.py` builds the app for whichever system it runs on and puts a zip in `dist`.
+`build_app.py` builds the app for whichever system it runs on and puts a zip in `dist`. It fetches Sparkle (Mac) or WinSparkle (Windows) itself, checking each download against a known checksum. On Windows with Inno Setup 6 installed, it also builds the installer.
 
 ## License
 

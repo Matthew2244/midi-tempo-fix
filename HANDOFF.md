@@ -6,7 +6,7 @@ Read this before changing anything. It's the current state, not a history.
 
 A tool that checks and fixes Standard MIDI Files so every DAW plays them the same: the tempo map (`core.py`) and the notes (`notes.py`), both standard library only. It also compares a file with another MIDI file, a REAPER project or a recording (`audio.py`), and turns a file's markers, or markers typed in by bar and beat, into Ableton Live locators named for AbleSet (`ableton.py`, window `ableton_gui.py`). Two front ends: the `midi-tempo` command (`cli.py`: `check`, `fix`, `ableton`) and a wxPython app (`gui.py`). Updates come through Sparkle on the Mac and WinSparkle for installed Windows copies (`sparkle.py`, `winsparkle.py`), and `update.py` for the rest. Mac and Windows; the command also runs on Linux.
 
-**Where it stands (2026-11-03):** 1.9.0 adds sets straight from REAPER projects, AbleSet lyrics tracks and exact curved tempo. 1.8.3 was released, signed and notarized, with signed update lists for both systems. The Studio has had real Sparkle updates (1.8.0 to 1.8.1 to 1.8.2); the MacBook is still on 1.8.0 and gets the next one through Sparkle. Not yet tried by a person: the Windows installer and WinSparkle on a real PC with a screen reader, and a set made on Windows opened in Live for Windows.
+**Where it stands (2026-11-03):** 1.9.0 is released, signed and notarized, with signed update lists for both systems. It adds sets straight from REAPER projects, AbleSet lyrics tracks and exact curved tempo to Make Ableton Set. Both Macs run 1.9.0: the Studio through four real Sparkle updates in a row (1.8.0 to 1.8.1, 1.8.2, 1.8.3, 1.9.0), the MacBook from the notarized zip over ssh. The MacBook's command is a clone at `~/midi-tempo-fix` pulled by `com.matthew.midi-tempo-fix-pull`, hourly since 2026-11-03 (it was 4 AM daily, and the log showed it failing every night with the laptop asleep or offline, stuck on 1.7.3 for three weeks). Not yet tried by a person: the Windows installer and WinSparkle on a real PC with a screen reader, and a set made on Windows opened in Live for Windows.
 
 Matthew's own copy of the command is `~/bin/midi-tempo`, a symlink to `midi-tempo` at the repo root, so the live tool and the repo can't drift. Edit the repo.
 
@@ -136,6 +136,8 @@ Markers become Live locators named the way AbleSet reads them (`> Verse`, the so
 - **From the review of these features (2026-11-03), each reproduced and fixed:** clip lists are matched by nesting (`_balanced_end`, `_empty_all`), because a clip's own envelope has an Events list inside and the first `</Events>` isn't the track's (Live's "Patience" demo broke on it); `_balanced_end` reads `<Devices />` as closed (a rack with an empty chain); the copy's take lanes are emptied (their clips had envelopes pointing into the source track), Freeze is off and SelectedDevice 0; lyric clips stop at the song's end, by bar or by time, and lines past it are named, never run into the next song; a set started from your own set renames its first MIDI track only when it's empty (no clips, no devices), else copies it; onto a song takes lyrics alone; the window reads a REAPER project's bars for typed markers and lyrics, and No File drops the last file's lyrics; REAPER backups (.rpp-bak) are projects, a project's name is kept whole ("tempo map and MIDI" isn't trimmed), markers after =END are left out and named, an empty project file says it may not be downloaded, and seconds-to-beats noise (118.9999999999995) is snapped to a 3840th of a beat. A whole curved segment's seconds are worked out once. 1,043 REAPER projects on the Studio plan without error.
 - Proven in Live with AbleSet reading `/lyrics/lyrics/current` at each line: a new set from "Better Days" (18 lines), the same song added to the test set with a copied lyrics track, typed lines onto a song in a set that already had one, and (after the review) Live's own "Patience" demo with a lyrics track copied from its MIDI tracks: no repair prompt, every line read. A set made straight from "Fresh Air - tempo map and MIDI.RPP" read 348.939 s in AbleSet, the same as the file's maths, with every section on its beat.
 
+**Dropping a REAPER project** on the window or the Dock icon (or opening one with the app, or passing it at launch) opens Make Ableton Set with it (`MainFrame.open_paths`); MIDI files and folders are checked as always. The Mac app declares .rpp as a document type it can open.
+
 **Reading a set back** (`describe_set`, `midi-tempo ableton --songs`): every song and its sections by bar, both kinds AbleSet uses, locators and Sections-track clips (`section_clips`). Onto a song, the window's preview lists what's there now and will be replaced. Bars are said with `where_text`, which reads a position within a hundredth of a beat before a bar line as that bar (a marker placed by time at 47.9986 is "bar 13", not "bar 12, beat 5"); the maths underneath stays exact.
 
 **Typed markers** (`TypedMarker`, `parse_markers`): `17 Verse`, `17.3 Pickup`, `17:3`, `bar 41 beat 2.5 Hit`, REAPER's `17.3.50` (hundredths of a beat). Beats count in the time signature's own unit, 1 is the downbeat. A beat the bar doesn't have is refused by name. One typed at the same place as a file marker takes its place. With no file, the tempo and time signature are given. Onto a song already in a set with no file, bar 1 is that song's start, counted in the set's own time signatures (`replan_on`). 2,000 typed markers in a test: fine.
@@ -190,13 +192,14 @@ REAPER's own MIDI export is exact: steps of 1/32 note, each at the average tempo
 
 - **The original file is never written.** Fixes go to `<name> (tempo fixed).<ext>`; the code refuses to overwrite the input.
 - **Every fix verifies itself** by reading the saved file back: no faults left, and the playback time of every non-tempo event matches the original within a microsecond. On failure the copy is deleted.
-- **Nothing beyond the three faults is changed.** No re-quantizing, no rounding tempos, no PPQ change.
+- **Nothing beyond the four faults is changed.** No re-quantizing, no rounding tempos, no PPQ change.
+- **A Live set is never written over.** New sets refuse an existing name; a set you have gets a "(markers added)" copy, or with `--update-set` a "(before markers)" backup first. Every set goes to a `.check` file, is read back (`_verify`), and only then takes its name.
 - **Output is sentences, written once.** No "(s)" plurals (`n()` in core), no progress spam. A screen reader user hears one clean report.
 - **In the app, focus goes to the report after every action.** All actions are in the File menu with shortcuts as well as on buttons.
 
 ## Settings and scripting
 
-The app remembers, through `wx.Config`, whether notes are checked and the last folder files were chosen from, so dialogs open there. `midi-tempo check --json` prints machine-readable results (per-file problems, doubled tempos, note counts, optional comparison) for scripts and other tools.
+The app remembers, through `wx.Config` (named `gui.CONFIG_NAME`: the app's name, or `MIDI_TEMPO_FIX_CONFIG` for test runs), whether notes are checked and the last folder files were chosen from, so dialogs open there, and the Make Ableton Set choices: `ableton_plain`, `ableton_quick`, `ableton_song_end`, `ableton_into_existing`, `ableton_last_set`, `ableton_template`. `midi-tempo check --json` prints machine-readable results (per-file problems, doubled tempos, note counts, optional comparison) for scripts and other tools.
 
 ## Comparing (universal)
 
@@ -233,8 +236,8 @@ Tested with VoiceOver on macOS 26 on 2026-10-11, driving the real app with keyst
 
 ## Not verified yet
 
-- NVDA, JAWS and Narrator on a real Windows machine. CI builds and self-tests the Windows app, but no person has used it there.
-- The Windows build has not run on a real Windows machine; CI builds and self-tests it.
+- NVDA, JAWS and Narrator on a real Windows machine, and the Windows build there at all. CI builds, installs and self-tests it, but no person has used it there.
 - Pro Tools has not been tested with a cleaned file.
 - A WinSparkle update on a real Windows machine.
-- A set made on Windows opened in Live for Windows.
+- A set made on Windows opened in Live for Windows (`live_templates()` reads `%ProgramData%\Ableton\Live*`, tested only against made-up paths).
+- A lyrics track or REAPER-made set opened in Live 11 (every Live check so far was Live 12.4.16).
