@@ -201,6 +201,19 @@ def test_songs_in_a_set_read_like_ableset(tmp_path):
     assert [A.song_title(x.name) for x, _ in songs] == ["Opener", "Closer"]
 
 
+def test_a_song_end_where_the_next_song_starts_is_listed_with_the_song_before(tmp_path):
+    s = live_set(tmp_path / "Show.als", [(0, "One", ""), (0, "> Intro", ""), (32, "SONG END", ""),
+                                         (32, "Two", ""), (40, "> Intro", ""), (72, "SONG END", "")])
+    lines = A.describe_set(A.LiveSet.load(s))
+    assert lines[1:] == ["Bar 1: One", "  Bar 1: > Intro", "  Bar 9: SONG END",
+                         "Bar 9: Two", "  Bar 11: > Intro", "  Bar 19: SONG END"]
+
+
+def test_the_song_name_is_labelled_in_the_preview():
+    p = A.plan_song(None, "Song", typed=A.parse_markers("1 Intro\n5 End"))
+    assert A.describe_plan(p)[1:3] == ["Bar 1: Song (the song's name, where the song starts)", "Bar 1: > Intro"]
+
+
 def test_names_are_escaped(tmp_path, template):
     p = A.plan_song(None, 'Rock & "Roll" <Live>', typed=A.parse_markers("1 A & B\n3 End"))
     r = A.new_set([p], str(tmp_path / "x.als"), template)

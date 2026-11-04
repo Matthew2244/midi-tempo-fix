@@ -1479,10 +1479,16 @@ def describe_set(ls: LiveSet) -> list[str]:
         return [f"{name} has no songs yet: no locators AbleSet reads as songs."]
     clips = section_clips(ls)
     lines = [f"{name}: {n(len(songs), 'song')}."]
-    for s, end in songs:
+    def belongs(l, i, s, end):
+        # A SONG END on the beat the next song starts is the song before's end, not the next one's
+        if l.name.startswith("SONG END"):
+            return s.beat < l.beat <= end or (i == 0 and l.beat == s.beat)
+        return s.beat <= l.beat < end
+
+    for i, (s, end) in enumerate(songs):
         lines.append(f"{where_text(sigs, s.beat, capital=True)}: {song_title(s.name)}"
                      + ("" if song_title(s.name) == s.name else f" (locator: {s.name})"))
-        here = [(l.beat, l.name) for l in ls.locators() if s.beat <= l.beat < end and l is not s
+        here = [(l.beat, l.name) for l in ls.locators() if belongs(l, i, s, end) and l is not s
                 and not is_song_locator(l.name)]
         here += [(b, f"{nm} (section clip)") for b, nm in clips if s.beat <= b < end]
         for b, nm in sorted(here):
