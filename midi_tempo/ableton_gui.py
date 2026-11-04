@@ -179,6 +179,9 @@ class AbletonDialog(wx.Dialog):
                                  f"text. Press it again to go further back. {CMD}-Z in the list does the same.")
         for b in (self.change_btn, self.remove_btn, self.undo_btn, self.several_btn):
             mk.Add(b, 0, wx.RIGHT, 8)
+        # Tab goes in the order controls were made; Undo was made after Edit as Text but sits before it
+        # (VoiceOver tabbed Change, Remove, Edit as Text, Undo; heard 2026-11-04)
+        self.undo_btn.MoveAfterInTabOrder(self.remove_btn)
         s.Add(mk, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
         self.save_midi_btn = wx.Button(p, label="Save Markers in a M&IDI Copy...")
         self.save_midi_btn.SetToolTip("Saves a copy of the MIDI file with these markers in it, so other apps get "
