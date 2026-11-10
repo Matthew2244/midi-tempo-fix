@@ -78,13 +78,13 @@ Putting markers onto a song whose tempo automation has curves works out the curv
 
 ## Download
 
-Get the latest version from the [Releases page](../../releases):
+These links always get the newest version. Older ones are on the [Releases page](../../releases).
 
-- **Mac:** MIDI-Tempo-Fix-mac.zip. Unzip it and move MIDI Tempo Fix to Applications. It's signed with a Developer ID and notarized by Apple, so it opens like any other app.
+- **Mac:** [download MIDI Tempo Fix for Mac](https://github.com/Matthew2244/midi-tempo-fix/releases/latest/download/MIDI-Tempo-Fix-mac.zip). Unzip it and move MIDI Tempo Fix to Applications. It's signed with a Developer ID and notarized by Apple, so it opens like any other app.
 
   The download is built for Apple silicon Macs. On an Intel Mac, install the command line version below and run `midi-tempo-fix` to open the app.
 
-- **Windows:** MIDI-Tempo-Fix-Setup.exe installs it for you alone, with no administrator password, a Start menu entry, and an entry in Settings, Apps to uninstall it. Installed copies update themselves. Or take MIDI-Tempo-Fix-windows.zip, unzip it anywhere and run MIDI Tempo Fix.exe inside the folder. If SmartScreen warns you, choose More info, then Run anyway.
+- **Windows:** [download MIDI Tempo Fix for Windows](https://github.com/Matthew2244/midi-tempo-fix/releases/latest/download/MIDI-Tempo-Fix-Setup.exe) and run it. It installs it for you alone, with no administrator password, a Start menu entry, and an entry in Settings, Apps to uninstall it. Installed copies update themselves. Or take [the Windows zip](https://github.com/Matthew2244/midi-tempo-fix/releases/latest/download/MIDI-Tempo-Fix-windows.zip), unzip it anywhere and run MIDI Tempo Fix.exe inside the folder. If SmartScreen warns you, choose More info, then Run anyway.
 
 ## Using the app
 
